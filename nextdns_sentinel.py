@@ -525,6 +525,9 @@ class Sentinel:
                     reason = event_reason(log) or "Custom denylist match"
                     client_ip = event_client_ip(log)
 
+                    recently_alerted = self.store.was_recently_alerted(
+                        profile_id, domain, ALERT_COOLDOWN
+                    )
                     if self.store.add_alert(
                         profile_id,
                         account["name"],
@@ -540,9 +543,7 @@ class Sentinel:
                             account["name"],
                             domain,
                         )
-                        if not self.store.was_recently_alerted(
-                            profile_id, domain, ALERT_COOLDOWN
-                        ):
+                        if not recently_alerted:
                             self.notify(
                                 account,
                                 domain,

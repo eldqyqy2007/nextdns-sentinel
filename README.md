@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/alerts-Telegram-26A5E4?labelColor=555" alt="Telegram alerts">
 </p>
 
-# NextDNS Sentinel
+# <img src="./assets/icons/sentinel.svg" alt="" width="32" height="32" align="absmiddle"> NextDNS Sentinel
 
 A local-first monitoring utility for **NextDNS profiles you own or administer**. It continuously reads NextDNS logs, checks observed domains against each profile's custom denylist, stores monitoring data in a local SQLite database, and sends optional Telegram alerts when a new match is detected.
 

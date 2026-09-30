@@ -20,7 +20,7 @@ The project is designed around a simple principle: **keep operational data local
 
 ## <img src="./assets/icons/overview.svg" alt="" width="24" height="24" align="absmiddle"> Table of contents
 
-- [Overview](#overview)
+- [Why this tool](#why-this-tool)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
@@ -37,7 +37,7 @@ The project is designed around a simple principle: **keep operational data local
 
 ---
 
-## <img src="./assets/icons/overview.svg" alt="" width="24" height="24" align="absmiddle"> Overview
+## <img src="./assets/icons/monitor.svg" alt="" width="24" height="24" align="absmiddle"> Why this tool
 
 NextDNS Sentinel is intended for defensive visibility over NextDNS configurations that you are authorized to manage.
 

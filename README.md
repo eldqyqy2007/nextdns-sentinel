@@ -18,7 +18,7 @@ The project is designed around a simple principle: **keep operational data local
 
 ---
 
-## <img src="./assets/icons/overview.svg" alt="" width="24" height="24" align="absmiddle"> Table of contents
+## <img src="./assets/icons/monitor.svg" alt="" width="24" height="24" align="absmiddle"> Table of contents
 
 - [Why this tool](#why-this-tool)
 - [Features](#features)
@@ -72,7 +72,7 @@ No hosted database or project-owned backend is required.
 
 ---
 
-## <img src="./assets/icons/architecture.svg" alt="" width="24" height="24" align="absmiddle"> Architecture
+## <img src="./assets/icons/process.svg" alt="" width="24" height="24" align="absmiddle"> Architecture
 
 ```text
                          NextDNS API

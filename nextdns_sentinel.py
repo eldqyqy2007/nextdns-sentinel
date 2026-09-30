@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, render_template_string
 
 APP_NAME = "NextDNS Sentinel"
@@ -29,6 +30,7 @@ CONFIG_PATH = Path(os.getenv("NEXTDNS_SENTINEL_CONFIG", "config.json"))
 LOG_LEVEL = os.getenv("NEXTDNS_SENTINEL_LOG_LEVEL", "INFO").upper()
 HTTP_TIMEOUT = float(os.getenv("NEXTDNS_SENTINEL_HTTP_TIMEOUT", "10"))
 CHECK_INTERVAL = int(os.getenv("NEXTDNS_SENTINEL_INTERVAL", "15"))
+SECRET_KEY = os.getenv("NEXTDNS_SENTINEL_SECRET_KEY", "")
 
 
 def utc_now() -> str:
@@ -44,6 +46,12 @@ def setup_logging() -> None:
 
 class Store:
     def __init__(self, path: Path) -> None:
+        if not SECRET_KEY:
+            raise RuntimeError("NEXTDNS_SENTINEL_SECRET_KEY is required.")
+        try:
+            self.cipher = Fernet(SECRET_KEY.encode())
+        except ValueError as exc:
+            raise RuntimeError("NEXTDNS_SENTINEL_SECRET_KEY is not a valid Fernet key.") from exc
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
@@ -92,7 +100,7 @@ class Store:
                 """,
                 (
                     account["profile_id"], account["name"], account.get("profile_name", ""),
-                    account["api_key"], int(account.get("active", True)),
+                    self.cipher.encrypt(account["api_key"].encode()).decode(), int(account.get("active", True)),
                     account.get("added_at", utc_now()),
                 ),
             )
@@ -100,9 +108,15 @@ class Store:
     def accounts(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
-            return [dict(r) for r in db.execute(
-                "SELECT profile_id,name,profile_name,api_key,active,added_at FROM accounts"
-            )]
+            rows = [dict(r) for r in db.execute("SELECT profile_id,name,profile_name,api_key,active,added_at FROM accounts")]
+        accounts = []
+        for row in rows:
+            try:
+                row["api_key"] = self.cipher.decrypt(row["api_key"].encode()).decode()
+            except InvalidToken as exc:
+                raise RuntimeError("Unable to decrypt a stored API key. Verify NEXTDNS_SENTINEL_SECRET_KEY.") from exc
+            accounts.append(row)
+        return accounts
 
     def replace_denylist(self, profile_id: str, domains: list[str]) -> None:
         now = utc_now()
@@ -232,7 +246,7 @@ class Sentinel:
 
     def notify(self, account: dict[str, Any], domain: str, client_ip: str = "") -> None:
         message = (
-            "🚨 NextDNS Sentinel alert\n\n"
+            "NextDNS Sentinel alert\n\n"
             f"Account: {account['name']}\n"
             f"Domain: {domain}\n"
             "Reason: Matched custom denylist\n"
@@ -304,7 +318,7 @@ main{max-width:1100px;margin:auto}h1{margin-bottom:6px}.muted{color:#8c98aa}
 table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}
 th,td{text-align:left;padding:13px;border-bottom:1px solid #202a3a}code{color:#9ed0ff}
 </style></head><body><main>
-<h1>🛡️ NextDNS Sentinel</h1><p class="muted">Local monitoring dashboard</p>
+<h1>NextDNS Sentinel</h1><p class="muted">Local monitoring dashboard</p>
 <div class="grid" id="stats"></div><h2>Recent alerts</h2><table><thead><tr>
 <th>Time</th><th>Account</th><th>Domain</th><th>Reason</th></tr></thead>
 <tbody id="alerts"></tbody></table></main>

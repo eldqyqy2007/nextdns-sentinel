@@ -3563,6 +3563,13 @@ function toggleSidebar(force){
  const s=document.getElementById('sidebar');if(!s)return;
  const open=typeof force==='boolean'?force:!s.classList.contains('open');s.classList.toggle('open',open);
 }
+document.addEventListener('click',event=>{
+ const sidebar=document.getElementById('sidebar');
+ if(!sidebar?.classList.contains('open'))return;
+ if(sidebar.contains(event.target)||event.target.closest('#sidebar-toggle'))return;
+ toggleSidebar(false);
+});
+
 async function loadRiskBaseline(){try{const [risk,base]=await Promise.all([api('/api/risk-history?days=30'),api('/api/baseline')]);const riskText=risk.slice(-10).map(x=>x.day+': avg '+Number(x.avg_risk||0).toFixed(1)+' · max '+x.max_risk+' · '+x.alerts+' alerts').join(' | ');const baseText=base.slice(0,12).map(x=>x.bucket_hour+':00 '+Number(x.baseline||0).toFixed(1)+' avg').join(' · ');setText('control-details','Risk history: '+(riskText||'No data')+' || Baseline: '+(baseText||'No data'),'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');await refresh();await loadControlCenter();}catch(e){setText('control-details',e.message,'error')}}
 async function showConfigDiff(){try{const accounts=await api('/api/accounts');if(!accounts.length){setText('control-details','No profiles configured.','muted');return}const d=await api('/api/config-diff/'+encodeURIComponent(accounts[0].profile_id));setText('control-details',d.changed?d.diff.map(x=>x.field+': '+JSON.stringify(x.before)+' → '+JSON.stringify(x.after)).join(' | '):'No recent configuration diff for '+accounts[0].profile_id,'muted')}catch(e){setText('control-details',e.message,'error')}}

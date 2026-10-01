@@ -335,7 +335,11 @@ class NextDNSClient:
                 response = self.session.get(url, params=params, timeout=HTTP_TIMEOUT)
                 if response.status_code == 429:
                     retry_after = response.headers.get("Retry-After", "")
-                    delay = min(float(retry_after) if retry_after else 2 ** attempt, 60.0)
+                    try:
+                        retry_delay = float(retry_after) if retry_after else 2 ** attempt
+                    except (TypeError, ValueError):
+                        retry_delay = 2 ** attempt
+                    delay = min(retry_delay, 60.0)
                     logging.warning(
                         "NextDNS rate limit (429) for %s; retrying in %.1fs",
                         path,
@@ -535,27 +539,51 @@ def event_key(profile_id: str, log: dict[str, Any]) -> str:
     return hashlib.sha256(f"{profile_id}:{raw}".encode()).hexdigest()
 
 
-def send_telegram(token: str, chat_id: str, message: str) -> bool:
+def send_telegram(
+    token: str, chat_id: str, message: str, retries: int = API_RETRIES
+) -> bool:
     if not token or not chat_id:
         return False
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": message},
-            timeout=HTTP_TIMEOUT,
-        )
-        if response.status_code == 429:
-            logging.warning("Telegram rate limit (429); alert was not delivered.")
-            return False
-        if not response.ok:
-            logging.error(
-                "Telegram delivery failed: HTTP %s", response.status_code
+
+    for attempt in range(retries + 1):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={"chat_id": chat_id, "text": message},
+                timeout=HTTP_TIMEOUT,
             )
+            if response.ok:
+                return True
+
+            if response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    retry_delay = float(retry_after) if retry_after else 2 ** attempt
+                except (TypeError, ValueError):
+                    retry_delay = 2 ** attempt
+                delay = min(retry_delay, 60.0)
+                if attempt < retries:
+                    logging.warning(
+                        "Telegram HTTP %s; retrying in %.1fs",
+                        response.status_code,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+            logging.error("Telegram delivery failed: HTTP %s", response.status_code)
             return False
-        return True
-    except requests.RequestException:
-        logging.exception("Telegram delivery failed")
-        return False
+        except requests.RequestException as exc:
+            if attempt >= retries:
+                logging.exception("Telegram delivery failed")
+                return False
+            delay = min(2 ** attempt, 30)
+            logging.warning(
+                "Telegram network error; retrying in %ss: %s", delay, exc
+            )
+            time.sleep(delay)
+
+    return False
 
 
 @dataclass

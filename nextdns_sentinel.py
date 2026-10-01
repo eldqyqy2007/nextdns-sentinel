@@ -694,13 +694,21 @@ class NextDNSClient:
             page = response.get("data", [])
             values.extend(page)
 
-            cursor = (
+            next_cursor = (
                 response.get("meta", {})
                 .get("pagination", {})
                 .get("cursor")
             )
-            if not cursor:
+            if not next_cursor:
                 break
+            if next_cursor == cursor:
+                logging.warning(
+                    "NextDNS returned the same log pagination cursor for profile %s; "
+                    "stopping pagination to avoid an infinite loop.",
+                    profile_id,
+                )
+                break
+            cursor = next_cursor
 
         if len(values) >= 1000:
             logging.info(

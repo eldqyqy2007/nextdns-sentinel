@@ -1029,8 +1029,10 @@ class Store:
 
     def mark_telegram_bot_result(self, bot_id: int, ok: bool, error: str = "") -> None:
         with sqlite3.connect(self.path) as db:
-            db.execute("UPDATE telegram_bots SET last_notification_at=?,last_error=?,updated_at=? WHERE id=?",
-                       (utc_now() if ok else "", "" if ok else error, utc_now(), bot_id))
+            if ok:
+                db.execute("UPDATE telegram_bots SET last_notification_at=?,last_error='',updated_at=? WHERE id=?",(utc_now(),utc_now(),bot_id))
+            else:
+                db.execute("UPDATE telegram_bots SET last_error=?,updated_at=? WHERE id=?",(error,utc_now(),bot_id))
 
     def set_setting(self, key: str, value: str) -> None:
         with sqlite3.connect(self.path) as db:
@@ -3459,6 +3461,7 @@ bindDashboardListener('telegram-form','submit',async e=>{
  catch(err){setText('telegram-status',err.message,'error');}
 });
 async function toggleTelegramBot(id,enabled){try{await api('/api/settings/telegram/bots/'+id+'/enable',{method:'POST',body:JSON.stringify({enabled})});await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
+async function checkTelegramBot(id){try{const d=await api('/api/settings/telegram/bots/'+id+'/check',{method:'POST'});setText('telegram-status','Active · @'+(d.bot_username||'bot')+' · '+(d.chat_title||'chat'),'ok');await refresh();}catch(e){setText('telegram-status','Telegram check failed: '+e.message,'error');await refresh();}}
 async function testTelegramBot(id){try{await api('/api/settings/telegram/bots/'+id+'/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function deleteTelegramBot(id){if(!confirm('Delete this Telegram bot?'))return;try{await api('/api/settings/telegram/bots/'+id,{method:'DELETE'});setText('telegram-status','Telegram bot deleted.','muted');await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function editTelegramBot(id){
@@ -3745,7 +3748,7 @@ async function refresh(){
   setText('telegram-status',tg.enabled?'Enabled · @'+(tg.bot_username||'bot')+' · '+(tg.chat_title||tg.chat_id):(tg.configured?'Disabled · Saved bot available to enable.':'Disabled · No Telegram bot configured.'),tg.enabled?'ok':'muted');
   const botCard=document.getElementById('telegram-bot-card');if(botCard){
    botCard.replaceChildren();const bots=await api('/api/settings/telegram/bots');
-   if(!bots.length){const empty=document.createElement('div');empty.className='muted';empty.textContent='No Telegram bots configured.';botCard.append(empty);}
+   if(!bots.length){const empty=document.createElement('div');empty.className='muted';empty.textContent=tg.configured?'Telegram is configured. Loading the saved bot…':'No Telegram bots configured.';botCard.append(empty);}
    for(const bot of bots){
     const item=document.createElement('div');item.className='account';const info=document.createElement('div');
     const title=document.createElement('strong');title.textContent=bot.name+' · '+(bot.bot_username?'@'+bot.bot_username:'unknown');
@@ -3753,8 +3756,9 @@ async function refresh(){
     const actions=document.createElement('div');actions.className='actions';
     const toggle=document.createElement('button');toggle.className=bot.enabled?'stop':'start';toggle.textContent=bot.enabled?'Disable':'Enable';toggle.onclick=()=>toggleTelegramBot(bot.id,!bot.enabled);
     const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=()=>editTelegramBot(bot.id);
+    const check=document.createElement('button');check.className='neutral';check.textContent='Check';check.onclick=()=>checkTelegramBot(bot.id);
     const test=document.createElement('button');test.className='neutral';test.textContent='Test';test.onclick=()=>testTelegramBot(bot.id);
-    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteTelegramBot(bot.id);actions.append(toggle,edit,test,del);item.append(info,actions);botCard.append(item);
+    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteTelegramBot(bot.id);actions.append(toggle,edit,check,test,del);item.append(info,actions);botCard.append(item);
    }
   }
  }catch(e){setText('telegram-status','Telegram status error: '+e.message,'error');}
@@ -4738,6 +4742,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             store.set_setting("telegram_enabled", "1")
             store.set_setting("telegram_last_test_at", "")
             store.set_setting("telegram_last_error", "")
+            existing=next((b for b in store.telegram_bots() if b.get("chat_id")==chat_id),None)
+            store.save_telegram_bot(int(existing["id"]) if existing else None,str(data.get("name") or identity["bot"].get("first_name") or "Telegram Bot"),token,chat_id,True,identity)
             sentinel.telegram_token = token
             sentinel.telegram_chat_id = chat_id
             features.audit("telegram_configured","settings","telegram",details={"chat_id":chat_id})
@@ -4776,6 +4782,18 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not store.set_telegram_bot_enabled(bot_id,enabled): return jsonify({"error":"Telegram bot not found."}),404
         features.audit("telegram_bot_enable" if enabled else "telegram_bot_disable","telegram_bot",str(bot_id))
         return jsonify({"enabled":enabled})
+
+    @app.post("/api/settings/telegram/bots/<int:bot_id>/check")
+    def api_telegram_bot_check(bot_id:int) -> Any:
+        bot=next((b for b in store.telegram_bots() if int(b["id"])==bot_id),None)
+        if not bot: return jsonify({"error":"Telegram bot not found."}),404
+        try:
+            identity=validate_telegram_credentials(bot["token"],bot["chat_id"])
+            store.mark_telegram_bot_result(bot_id,True,"")
+            return jsonify({"active":True,"bot_username":str(identity["bot"].get("username") or ""), "bot_name":str(identity["bot"].get("first_name") or ""), "chat_title":str(identity["chat"].get("title") or identity["chat"].get("first_name") or identity["chat"].get("username") or ""), "checked_at":utc_now()})
+        except Exception as exc:
+            store.mark_telegram_bot_result(bot_id,False,str(exc))
+            return jsonify({"active":False,"error":str(exc),"checked_at":utc_now()}),502
 
     @app.post("/api/settings/telegram/bots/<int:bot_id>/test")
     def api_telegram_bot_test(bot_id:int) -> Any:

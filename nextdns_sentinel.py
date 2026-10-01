@@ -38,7 +38,38 @@ API_RETRIES = max(0, int(os.getenv("NEXTDNS_SENTINEL_API_RETRIES", "3")))
 NOTIFICATION_RETRY_BASE = max(5, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_BASE", "30")))
 NOTIFICATION_RETRY_MAX = max(NOTIFICATION_RETRY_BASE, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_MAX", "900")))
 MAX_NOTIFICATION_ATTEMPTS = max(1, int(os.getenv("NEXTDNS_SENTINEL_MAX_NOTIFICATION_ATTEMPTS", "10")))
-SECRET_KEY = os.getenv("NEXTDNS_SENTINEL_SECRET_KEY", "")
+SECRET_KEY_FILE = Path(
+    os.getenv("NEXTDNS_SENTINEL_SECRET_FILE", "data/.sentinel_secret")
+)
+
+
+def load_or_create_secret_key() -> str:
+    env_key = os.getenv("NEXTDNS_SENTINEL_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    SECRET_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if SECRET_KEY_FILE.exists():
+            key = SECRET_KEY_FILE.read_text(encoding="utf-8").strip()
+            if key:
+                return key
+
+        key = Fernet.generate_key().decode("ascii")
+        fd = os.open(SECRET_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, key.encode("ascii"))
+        finally:
+            os.close(fd)
+        return key
+    except FileExistsError:
+        key = SECRET_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
+        raise RuntimeError("NEXTDNS_SENTINEL_SECRET_FILE exists but is empty.")
+
+
+SECRET_KEY = load_or_create_secret_key()
 
 
 def utc_now() -> str:
@@ -58,12 +89,12 @@ class NextDNSError(RuntimeError):
 
 class Store:
     def __init__(self, path: Path) -> None:
-        if not SECRET_KEY:
-            raise RuntimeError("NEXTDNS_SENTINEL_SECRET_KEY is required.")
         try:
             self.cipher = Fernet(SECRET_KEY.encode())
-        except ValueError as exc:
-            raise RuntimeError("NEXTDNS_SENTINEL_SECRET_KEY is not a valid Fernet key.") from exc
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(
+                "The configured NextDNS Sentinel secret key is not a valid Fernet key."
+            ) from exc
 
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)

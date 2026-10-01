@@ -838,6 +838,8 @@ class Store:
                     source TEXT NOT NULL DEFAULT 'unknown'
                 )
             """)
+            db.execute("DELETE FROM config_snapshots WHERE rowid NOT IN (SELECT MAX(rowid) FROM config_snapshots GROUP BY profile_id)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_config_snapshots_profile_unique ON config_snapshots(profile_id)")
             config_change_columns={row[1] for row in db.execute("PRAGMA table_info(config_changes)")}
             if "source" not in config_change_columns:
                 db.execute("ALTER TABLE config_changes ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'")

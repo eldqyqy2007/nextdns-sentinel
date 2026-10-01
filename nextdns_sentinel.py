@@ -428,7 +428,14 @@ class NextDNSClient:
         domains: list[str] = []
         cursor: str | None = None
 
+        seen_cursors: set[str] = set()
         while True:
+            if cursor:
+                if cursor in seen_cursors:
+                    raise NextDNSError(
+                        f"NextDNS denylist pagination repeated cursor for profile {profile_id}."
+                    )
+                seen_cursors.add(cursor)
             params: dict[str, Any] = {"limit": 100}
             if cursor:
                 params["cursor"] = cursor
@@ -455,11 +462,21 @@ class NextDNSClient:
         values: list[dict[str, Any]] = []
         cursor: str | None = None
         from_value = datetime.fromtimestamp(from_ms / 1000, timezone.utc).isoformat()
+        to_ms = int(time.time() * 1000)
+        to_value = datetime.fromtimestamp(to_ms / 1000, timezone.utc).isoformat()
+        seen_cursors: set[str] = set()
 
         while True:
+            if cursor:
+                if cursor in seen_cursors:
+                    raise NextDNSError(
+                        f"NextDNS log pagination repeated cursor for profile {profile_id}."
+                    )
+                seen_cursors.add(cursor)
             params: dict[str, Any] = {
                 "limit": 1000,
                 "from": from_value,
+                "to": to_value,
                 "sort": "asc",
             }
             if cursor:

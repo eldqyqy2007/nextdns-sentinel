@@ -2863,6 +2863,10 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="grid" id="stats"></div>
+<div class="panel" id="summary-details" style="display:none">
+<div class="section-head"><div><h2 id="summary-details-title">Summary Details</h2><div class="muted">Full details and recent records for the selected summary.</div></div><button class="neutral" type="button" onclick="closeSummaryDetails()">Close</button></div>
+<div id="summary-details-body" class="mini-list"></div>
+</div>
 
 <div class="analytics">
 <div class="panel">
@@ -2974,9 +2978,67 @@ function formatDateTime(value){
  if(!value)return '—';
  const d=new Date(value);
  if(Number.isNaN(d.getTime()))return String(value);
- return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'medium'}).format(d);
+ const pad=n=>String(n).padStart(2,'0');
+ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());
 }
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
+
+function summaryDetailRow(label,value){
+ const row=document.createElement('div');row.className='mini-item';
+ const left=document.createElement('span');left.className='muted';left.textContent=label;
+ const right=document.createElement('strong');right.textContent=value==null||value===''?'—':String(value);
+ row.append(left,right);return row;
+}
+function summaryDetailButton(label,page,target){
+ const b=document.createElement('button');b.className='neutral';b.type='button';b.textContent=label;b.onclick=()=>navigateToTarget(page,target);return b;
+}
+async function openSummaryDetails(label,stats){
+ const panel=document.getElementById('summary-details'),title=document.getElementById('summary-details-title'),body=document.getElementById('summary-details-body');
+ if(!panel||!title||!body)return;
+ panel.dataset.open='1';panel.style.display='block';title.textContent=label+' · Details';body.replaceChildren();
+ const loading=document.createElement('div');loading.className='muted';loading.textContent='Loading details…';body.append(loading);
+ panel.scrollIntoView({behavior:'smooth',block:'start'});
+ try{
+  body.replaceChildren();
+  if(label==='Monitored Profiles'||label==='Active Profiles'){
+   const accounts=await api('/api/accounts');const rows=label==='Active Profiles'?accounts.filter(a=>a.active):accounts;
+   body.append(summaryDetailRow('Total',rows.length));
+   for(const a of rows){
+    const row=document.createElement('div');row.className='mini-item';
+    const info=document.createElement('span');info.innerHTML='<strong></strong><br><span class="muted"></span>';info.querySelector('strong').textContent=a.name||a.profile_name||a.profile_id;info.querySelector('.muted').textContent=a.profile_id+' · '+(a.active?'Active':'Inactive')+' · Added '+formatDateTime(a.added_at);
+    row.append(info,summaryDetailButton('Open profiles','profiles','accounts'));body.append(row);
+   }
+   if(!rows.length)body.append(summaryDetailRow('Result','No profiles found.'));
+  }else if(label==='Alerts Total'){
+   const alerts=await api('/api/alerts');body.append(summaryDetailRow('Total records loaded',alerts.length));
+   for(const a of alerts.slice(0,100)){
+    const row=document.createElement('div');row.className='mini-item';
+    const info=document.createElement('span');info.innerHTML='<strong></strong><br><span class="muted"></span>';info.querySelector('strong').textContent=(a.domain||a.alert_type||'Security event')+' · '+(a.severity||'—').toUpperCase();info.querySelector('.muted').textContent=(a.profile_id||'')+' · '+(a.reason||a.status||'')+' · '+formatDateTime(a.event_timestamp||a.created_at);
+    row.append(info);body.append(row);
+   }
+   body.append(summaryDetailButton('Open full Alerts log','security','alerts'));
+  }else if(label==='Denylist Entries'){
+   const accounts=await api('/api/accounts');let total=0;
+   for(const a of accounts){
+    let entries=[];try{entries=await api('/api/denylist/'+encodeURIComponent(a.profile_id));}catch(e){entries=[];}
+    total+=entries.length;const row=document.createElement('div');row.className='account';
+    const head=document.createElement('strong');head.textContent=(a.name||a.profile_name||a.profile_id)+' · '+entries.length+' entries';row.append(head);
+    const list=document.createElement('div');list.className='mini-list';
+    for(const entry of entries.slice(0,100)){const item=document.createElement('div');item.className='mini-item';item.textContent=entry.domain||String(entry);list.append(item);}
+    row.append(list);body.append(row);
+   }
+   body.prepend(summaryDetailRow('Total denylist entries',total));body.append(summaryDetailButton('Open full Denylist management','profiles','denylist'));
+  }else if(label==='Poll Interval'){
+   const health=await api('/api/health');body.append(summaryDetailRow('Poll interval',String(stats.poll_interval_seconds||0)+'s'),summaryDetailRow('Monitor status',health?.running?'Running':'Stopped'),summaryDetailRow('Last successful poll',formatDateTime(stats.last_success_at)),summaryDetailRow('Last error',stats.last_error||'None'),summaryDetailButton('Open monitor health','overview','health'));
+  }
+ }catch(e){
+  body.replaceChildren();body.append(summaryDetailRow('Error',e.message));
+ }
+}
+function closeSummaryDetails(){
+ const panel=document.getElementById('summary-details');if(!panel)return;
+ panel.dataset.open='0';panel.style.display='none';
+}
 
 function renderIntelligence(data){
  const sev={};for(const x of data?.intelligence?.severity||[])sev[x.severity]=x.count;
@@ -3552,17 +3614,11 @@ async function refresh(){
   const cards=[
     ['Monitored Profiles',s.accounts],['Active Profiles',s.active_accounts],['Alerts Total',s.alerts],['Denylist Entries',s.denylist_entries],['Poll Interval',s.poll_interval_seconds+'s']
   ];
-  const cardTargets={
-    'Monitored Profiles':['profiles','accounts'],
-    'Active Profiles':['overview','profile-health'],
-    'Alerts Total':['security','alerts'],
-    'Denylist Entries':['profiles','denylist'],
-    'Poll Interval':['overview','health']
-  };
   for(const [label,value] of cards){
     const card=document.createElement('div');card.className='card';card.style.cursor='pointer';card.tabIndex=0;
     const l=document.createElement('div');l.className='muted';l.textContent=label;const val=document.createElement('div');val.className='value';val.textContent=value;card.append(l,val);
-    const target=cardTargets[label];if(target){card.onclick=()=>navigateToTarget(target[0],target[1]);card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();navigateToTarget(target[0],target[1]);}}}
+    card.onclick=()=>openSummaryDetails(label,s);
+    card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openSummaryDetails(label,s);}};
     stats.append(card);
   }
   const analytics=await api('/api/analytics');renderAnalytics(analytics);renderIntelligence(analytics);loadIncidents();loadDomains();loadSentinelHealth();
@@ -3642,6 +3698,7 @@ function showPage(page){
  setupDashboardPages();
  document.querySelectorAll('.panel[data-page]').forEach(p=>{p.style.display=p.dataset.page===page?'block':'none'});document.querySelectorAll('.panel[data-page=""]').forEach(p=>p.style.display='none');
  const stats=document.getElementById('stats');if(stats)stats.style.display=page==='overview'?'grid':'none';
+ const summaryDetails=document.getElementById('summary-details');if(summaryDetails&&page!=='overview'){summaryDetails.dataset.open='0';summaryDetails.style.display='none';}
  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
  if(page==='analytics'){loadRangeAnalytics();loadRiskBaseline();}
  if(page==='operations')loadControlCenter();

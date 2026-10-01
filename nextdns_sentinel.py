@@ -770,6 +770,14 @@ class Store:
                     next_retry_at TEXT NOT NULL DEFAULT ''
                 );
 
+                CREATE TABLE IF NOT EXISTS notification_state (
+                    alert_id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL DEFAULT 'created',
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT NOT NULL DEFAULT '',
+                    seen_at TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_alerts_created_at
                 ON alerts(created_at);
 
@@ -837,6 +845,19 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN last_notification_attempt_at TEXT NOT NULL DEFAULT ''")
         if "next_retry_at" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN next_retry_at TEXT NOT NULL DEFAULT ''")
+        db.execute("""
+            INSERT OR IGNORE INTO notification_state(alert_id,state,created_at,sent_at,seen_at)
+            SELECT id,
+                   CASE
+                     WHEN seen_at<>'' THEN 'seen'
+                     WHEN notified_at<>'' OR notification_status IN ('sent','suppressed') THEN 'sent'
+                     ELSE 'created'
+                   END,
+                   created_at,
+                   notified_at,
+                   seen_at
+            FROM alerts
+        """)
         for column, definition in {
             "alert_type": "TEXT NOT NULL DEFAULT 'denylist_match'",
             "device_id": "TEXT NOT NULL DEFAULT ''",
@@ -1018,7 +1039,10 @@ class Store:
 
     def mark_alert_seen(self, alert_id: int) -> bool:
         with sqlite3.connect(self.path) as db:
-            cur=db.execute("UPDATE alerts SET seen_at=? WHERE id=? AND seen_at=''",(utc_now(),alert_id))
+            now=utc_now()
+            cur=db.execute("UPDATE alerts SET seen_at=? WHERE id=? AND seen_at=''",(now,alert_id))
+            if cur.rowcount:
+                db.execute("UPDATE notification_state SET state='seen',seen_at=? WHERE alert_id=?",(now,alert_id))
             return cur.rowcount>0
 
     def update_device_state(self, profile_id: str, device_id: str, device_name: str,
@@ -1120,6 +1144,12 @@ class Store:
                         int(encrypted), source, utc_now(),
                     ),
                 )
+                alert_row=db.execute("SELECT id,created_at FROM alerts WHERE event_key=?", (event_key,)).fetchone()
+                if alert_row:
+                    db.execute(
+                        "INSERT OR IGNORE INTO notification_state(alert_id,state,created_at) VALUES(?,?,?)",
+                        (alert_row[0],"created",alert_row[1]),
+                    )
             if self.save_alert_logs_enabled():
                 self.append_alert_to_file(
                     {
@@ -1170,6 +1200,12 @@ class Store:
                 """,
                 (utc_now(), event_key),
             )
+            db.execute("""
+                UPDATE notification_state
+                SET state=CASE WHEN seen_at<>'' THEN 'seen' ELSE 'sent' END,
+                    sent_at=?
+                WHERE alert_id=(SELECT id FROM alerts WHERE event_key=?)
+            """,(utc_now(),event_key))
 
     def mark_alert_suppressed(self, event_key: str) -> None:
         with sqlite3.connect(self.path) as db:
@@ -1237,11 +1273,13 @@ class Store:
                     """
                     SELECT id,event_key,account_name,domain,matched_domain,reason,status,
                            client_ip,event_timestamp,device_id,device_name,device_model,protocol,encrypted
-                    FROM alerts
-                    WHERE profile_id=? AND notified_at=''
-                      AND notification_status='pending'
-                      AND (next_retry_at='' OR next_retry_at<=?)
-                    ORDER BY id ASC LIMIT ?
+                    FROM alerts a
+                    JOIN notification_state ns ON ns.alert_id=a.id
+                    WHERE a.profile_id=? AND a.notified_at=''
+                      AND a.notification_status='pending'
+                      AND ns.state='created'
+                      AND (a.next_retry_at='' OR a.next_retry_at<=?)
+                    ORDER BY a.id ASC LIMIT ?
                     """,
                     (profile_id, utc_now(), limit),
                 )

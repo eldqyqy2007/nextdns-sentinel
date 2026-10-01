@@ -1274,9 +1274,10 @@ class Store:
                 "poll_interval_seconds": CHECK_INTERVAL,
             }
 
-    def alert_analytics(self) -> dict[str, Any]:
+    def alert_analytics(self, hours: int = 24) -> dict[str, Any]:
+        hours=max(1,min(720,int(hours)))
         now = datetime.now(timezone.utc)
-        start = now - timedelta(hours=24)
+        start = now - timedelta(hours=hours)
         start_iso = start.isoformat()
         with sqlite3.connect(self.path) as db:
             rows = db.execute(
@@ -1289,7 +1290,7 @@ class Store:
                 (start_iso,),
             ).fetchall()
         buckets: dict[str, int] = {}
-        for i in range(24):
+        for i in range(hours):
             bucket = (start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=i)).isoformat()
             buckets[bucket] = 0
         status_counts: dict[str, int] = {}
@@ -2478,6 +2479,23 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="panel">
+<div class="section-head"><div><h2>Sentinel Control Center</h2><div class="muted">Operational controls, alert policy, diagnostics and safe maintenance</div></div><span id="live-pill" class="pill">Live</span></div>
+<div class="row">
+<select id="analytics-range" onchange="loadRangeAnalytics()"><option value="1">1 hour</option><option value="6">6 hours</option><option value="24" selected>24 hours</option><option value="168">7 days</option><option value="720">30 days</option></select>
+<button class="neutral" onclick="loadControlCenter()">Refresh Control Center</button>
+<button class="neutral" onclick="exportSettings()">Export Settings</button>
+<label class="neutral" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">Import Settings<input id="settings-import" type="file" accept=".json,application/json" hidden onchange="importSettings(this)"></label>
+</div>
+<div id="control-summary" class="mini-list"><div class="muted">Loading...</div></div>
+<div class="grid">
+<div class="panel"><h3>Alert Rules</h3><div class="row"><input id="rule-name" placeholder="Rule name"><input id="rule-json" placeholder='{"action":"suppress","domain":"example.com"}'><button class="start" onclick="saveRule()">Save Rule</button></div><div id="rules-list" class="mini-list"></div></div>
+<div class="panel"><h3>Maintenance / Suppression</h3><div class="row"><input id="maintenance-seconds" type="number" min="60" value="3600"><input id="maintenance-reason" placeholder="Reason"><button class="neutral" onclick="enableMaintenance()">Enable Maintenance</button></div><div class="row"><input id="suppression-fingerprint" placeholder="Fingerprint"><input id="suppression-seconds" type="number" min="30" value="600"><button class="neutral" onclick="addSuppression()">Suppress</button></div></div>
+</div>
+<div class="row"><button class="neutral" onclick="toggleSafeMode()">Toggle Safe Mode</button><button class="neutral" onclick="loadDiagnostics()">Diagnostics</button><button class="neutral" onclick="loadIncidentMetrics()">Incident Metrics</button><button class="neutral" onclick="loadRateLimits()">Rate Limits</button></div>
+<div id="control-details" class="mini-list"></div>
+</div>
+
+<div class="panel">
 <h2>Alert Log Storage</h2>
 <label class="row"><input id="save-alert-logs" type="checkbox" style="width:auto;margin:0 8px 0 0"> Save Recent Alerts to file automatically</label>
 <p class="muted">Alerts are also kept in SQLite. When enabled, each new alert is appended immediately to <code>data/recent_alerts.jsonl</code>.</p>
@@ -2898,7 +2916,42 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
-detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();refresh();setInterval(()=>{refresh();loadConfigChanges()},5000);
+detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+async function loadControlCenter(){
+ try{
+  const d=await api('/api/control-center');const box=document.getElementById('control-summary');box.replaceChildren();
+  const rows=[['Safe Mode',d.safe_mode?'Enabled':'Disabled'],['Rules',String(d.rules?.length||0)],['Maintenance',d.maintenance?(d.maintenance.reason||'Active'):'Inactive'],['Database',d.diagnostics?.database?'OK':'Error'],['Schema',d.diagnostics?.schema?'OK':'Error']];
+  for(const [a,b] of rows){const x=document.createElement('div');x.className='mini-item';x.innerHTML='<strong></strong><span></span>';x.firstChild.textContent=a;x.lastChild.textContent=b;box.append(x);}
+  const rl=document.getElementById('rules-list');rl.replaceChildren();
+  for(const r of d.rules||[]){const x=document.createElement('div');x.className='mini-item';x.innerHTML='<span></span><button class="stop">Delete</button>';x.firstChild.textContent=r.name+' · '+(r.enabled?'Enabled':'Disabled');x.lastChild.onclick=async()=>{await api('/api/rules/'+r.id,{method:'DELETE'});loadControlCenter()};rl.append(x);}
+ }catch(e){setText('control-summary',e.message,'error')}
+}
+async function loadRangeAnalytics(){
+ const h=document.getElementById('analytics-range').value;try{const d=await api('/api/analytics?hours='+h);renderAnalytics(d);renderIntelligence(d);}catch(e){setText('health',e.message,'error')}
+}
+async function saveRule(){
+ const name=document.getElementById('rule-name').value.trim();let rule={};
+ try{rule=JSON.parse(document.getElementById('rule-json').value||'{}')}catch(e){alert('Rule JSON is invalid.');return}
+ if(!name)return alert('Rule name is required.');
+ await api('/api/rules',{method:'POST',body:JSON.stringify({name,rule,enabled:true})});document.getElementById('rule-name').value='';document.getElementById('rule-json').value='';loadControlCenter();
+}
+async function enableMaintenance(){
+ const seconds=Math.max(60,Number(document.getElementById('maintenance-seconds').value)||3600);const reason=document.getElementById('maintenance-reason').value.trim();
+ await api('/api/maintenance',{method:'POST',body:JSON.stringify({scope:'global',seconds,reason})});loadControlCenter();
+}
+async function addSuppression(){
+ const fingerprint=document.getElementById('suppression-fingerprint').value.trim();const seconds=Math.max(30,Number(document.getElementById('suppression-seconds').value)||600);
+ if(!fingerprint)return alert('Fingerprint is required.');
+ await api('/api/suppressions',{method:'POST',body:JSON.stringify({fingerprint,seconds,reason:'Dashboard suppression'})});loadControlCenter();
+}
+async function toggleSafeMode(){
+ const d=await api('/api/control-center');const enabled=!d.safe_mode;await api('/api/safe-mode',{method:'POST',body:JSON.stringify({enabled})});loadControlCenter();
+}
+async function loadDiagnostics(){const d=await api('/api/diagnostics');setText('control-details',Object.entries(d).map(([k,v])=>k+': '+(v?'OK':'FAIL')).join(' · '),Object.values(d).every(Boolean)?'ok':'error');}
+async function loadIncidentMetrics(){const d=await api('/api/incident-metrics');setText('control-details','Incidents: '+d.total_incidents+' · Open: '+d.open_incidents+' · Resolved: '+d.resolved_incidents+' · MTTR: '+d.mean_time_to_resolve_seconds+'s · Alerts: '+d.total_alerts,'muted');}
+async function loadRateLimits(){const d=await api('/api/control-center');setText('control-details',(d.rate_limits||[]).map(x=>x.endpoint+' · retry '+x.retry_after+'s · '+formatDateTime(x.created_at)).join(' | ')||'No rate-limit events recorded.','muted');}
+async function exportSettings(){const d=await api('/api/settings/export');const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='nextdns-sentinel-settings.json';a.click();URL.revokeObjectURL(a.href);}
+async function importSettings(input){if(!input.files?.[0])return;try{const text=await input.files[0].text();const d=await api('/api/settings/import',{method:'POST',body:text});setText('control-details','Imported '+JSON.stringify(d.imported),'ok');loadControlCenter();}catch(e){setText('control-details',e.message,'error')}input.value='';}
 </script>
 </body>
 </html>"""
@@ -2970,7 +3023,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/analytics")
     def api_analytics() -> Any:
-        base=store.alert_analytics()
+        hours=max(1,min(720,int(request.args.get("hours","24"))))
+        base=store.alert_analytics(hours)
         base["intelligence"]=features.analytics()
         return jsonify(base)
 

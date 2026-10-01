@@ -554,13 +554,18 @@ class FeatureStore:
             )
             heartbeat=db.execute("SELECT updated_at,value FROM sentinel_health WHERE key='heartbeat'").fetchone()
             heartbeat_age=None
+            heartbeat_state='unknown'
             if heartbeat:
                 try:
                     heartbeat_age=(datetime.now(timezone.utc)-datetime.fromisoformat(str(heartbeat['updated_at']).replace('Z','+00:00'))).total_seconds()
                 except ValueError:
                     heartbeat_age=None
-            checks['heartbeat']=heartbeat_age is not None and heartbeat_age < 120
-            return {"checks":checks,"healthy":all(checks.values()),"heartbeat_age_seconds":heartbeat_age,"checked_at":now_iso()}
+                payload=_loads(heartbeat['value'],{})
+                if isinstance(payload,dict): heartbeat_state=str(payload.get('state') or 'unknown')
+            # A deliberately stopped monitor is a valid runtime state; it is not
+            # a stale-heartbeat failure. A running monitor must keep heartbeating.
+            checks['heartbeat'] = heartbeat_state == 'stopped' or (heartbeat_age is not None and 0 <= heartbeat_age < 120)
+            return {"checks":checks,"healthy":all(checks.values()),"heartbeat_age_seconds":heartbeat_age,"heartbeat_state":heartbeat_state,"checked_at":now_iso()}
 
     def export_json(self) -> dict[str, Any]:
         return {

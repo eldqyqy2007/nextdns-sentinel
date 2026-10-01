@@ -2005,7 +2005,10 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
             current=config_snapshot(client.profile(change["profile_id"]))
             if current!=after:
                 return jsonify({"error":"Undo refused: the profile changed again after this audit event."}),409
-            client._patch(f"/profiles/{change['profile_id']}",before)
+            rollback={k:before[k] for k in before if before.get(k)!=after.get(k)}
+            if not rollback:
+                return jsonify({"error":"Nothing to undo."}),409
+            client._patch(f"/profiles/{change['profile_id']}",rollback)
             store.mark_change_undone(change_id)
             store.save_config_snapshot(change["profile_id"],before)
             return jsonify({"undone":True})

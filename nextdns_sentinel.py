@@ -171,6 +171,23 @@ class Store:
                 """
             )
             self._migrate_alert_columns(db)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS config_snapshots (
+                profile_id TEXT PRIMARY KEY,
+                snapshot TEXT NOT NULL,
+                captured_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS config_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                before_json TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                changed_at TEXT NOT NULL,
+                undone_at TEXT NOT NULL DEFAULT ''
+            );
+        """)
+
 
     @staticmethod
     def _migrate_alert_columns(db: sqlite3.Connection) -> None:
@@ -328,6 +345,29 @@ class Store:
                     (profile_id,),
                 )
             ]
+
+    def config_snapshot(self, profile_id: str) -> dict[str,Any] | None:
+        with sqlite3.connect(self.path) as db:
+            row=db.execute("SELECT snapshot FROM config_snapshots WHERE profile_id=?",(profile_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_config_snapshot(self, profile_id: str, snapshot: dict[str,Any]) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO config_snapshots(profile_id,snapshot,captured_at) VALUES(?,?,?) ON CONFLICT(profile_id) DO UPDATE SET snapshot=excluded.snapshot,captured_at=excluded.captured_at",(profile_id,json.dumps(snapshot,sort_keys=True,separators=(',',':')),utc_now()))
+
+    def add_config_change(self, profile_id: str, before: dict[str,Any], after: dict[str,Any], change_type: str) -> int:
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute("INSERT INTO config_changes(profile_id,change_type,before_json,after_json,changed_at) VALUES(?,?,?,?,?)",(profile_id,change_type,json.dumps(before,sort_keys=True),json.dumps(after,sort_keys=True),utc_now()))
+            return int(cur.lastrowid)
+
+    def config_changes(self, limit:int=50) -> list[dict[str,Any]]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory=sqlite3.Row
+            return [dict(r) for r in db.execute("SELECT id,profile_id,change_type,before_json,after_json,changed_at,undone_at FROM config_changes ORDER BY id DESC LIMIT ?",(limit,))]
+
+    def mark_change_undone(self, change_id:int) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE config_changes SET undone_at=? WHERE id=?",(utc_now(),change_id))
 
     def mark_alert_seen(self, alert_id: int) -> bool:
         with sqlite3.connect(self.path) as db:
@@ -909,6 +949,12 @@ class NextDNSClient:
         return values
 
 
+    def profile(self, profile_id: str) -> dict[str,Any]:
+        response=self._get(f"/profiles/{profile_id}")
+        profile=response.get("data",response)
+        if not isinstance(profile,dict): raise NextDNSError("Unexpected profile response.")
+        return profile
+
     def update_profile_name(self, profile_id: str, name: str) -> None:
         if not name:
             raise NextDNSError("NextDNS profile name is required.")
@@ -992,6 +1038,20 @@ class NextDNSClient:
             )
         return values, to_ms
 
+
+def config_snapshot(profile: dict[str,Any]) -> dict[str,Any]:
+    value=json.loads(json.dumps(profile,sort_keys=True,default=str))
+    if isinstance(value,dict):
+        value.pop("id",None)
+        value.pop("meta",None)
+    return value
+
+def config_change_summary(before: dict[str,Any], after: dict[str,Any]) -> str:
+    changed=[]
+    keys=sorted(set(before)|set(after))
+    for key in keys:
+        if before.get(key)!=after.get(key): changed.append(key)
+    return ", ".join(changed) if changed else "configuration"
 
 def normalize_domain(domain: str) -> str:
     return domain.strip().lower().rstrip(".")
@@ -1197,13 +1257,14 @@ class Sentinel:
         client_ip: str = "",
         event_time: str = "",
     ) -> bool:
+        title="Configuration change" if status=="config_changed" else "NextDNS Sentinel alert"
         message = (
-            "NextDNS Sentinel alert\n\n"
+            f"{title}\n\n"
             f"Account: {account['name']}\n"
-            f"Domain: {domain}\n"
+            f"Domain: {domain or 'n/a'}\n"
             f"Matched: {matched or 'n/a'}\n"
             f"Status: {status or 'n/a'}\n"
-            f"Reason: {reason or 'Custom denylist match'}\n"
+            f"Reason: {reason or 'Security event'}\n"
             f"Event Time: {event_time or 'n/a'}\n"
             f"Detected At: {utc_now()}"
         )
@@ -1224,6 +1285,21 @@ class Sentinel:
             try:
                 iteration += 1
                 if iteration == 1 or iteration % 20 == 0:
+                    try:
+                        live_profile=client.profile(profile_id)
+                        live_snapshot=config_snapshot(live_profile)
+                        previous=self.store.config_snapshot(profile_id)
+                        if previous is not None and previous != live_snapshot:
+                            change_type=config_change_summary(previous,live_snapshot)
+                            change_id=self.store.add_config_change(profile_id,previous,live_snapshot,change_type)
+                            key=hashlib.sha256(f"config:{profile_id}:{change_id}".encode()).hexdigest()
+                            self.store.add_alert(profile_id,account["name"],"", "", "Configuration changed: "+change_type, "config_changed", "", utc_now(), key, "config_change", source="nextdns_profile")
+                            delivered=self.notify(account,"","Configuration changed: "+change_type,"config_changed","",event_time=utc_now())
+                            if delivered: self.store.mark_alert_notified(key)
+                            else: self.store.mark_notification_failed(key)
+                        self.store.save_config_snapshot(profile_id,live_snapshot)
+                    except Exception as exc:
+                        logging.warning("Profile configuration snapshot failed for %s: %s",account["name"],exc)
                     removed = self.store.cleanup_alerts(ALERT_RETENTION_DAYS)
                     if removed:
                         logging.info("Removed %d old delivered alerts.", removed)
@@ -1468,6 +1544,10 @@ DASHBOARD = """<!doctype html>
 </div>
 </div>
 
+<div class="panel">
+<div class="section-head"><div><h2>Configuration Changes</h2><div class="muted">Changes detected by comparing the live NextDNS profile with the last known snapshot.</div></div></div>
+<div id="config-changes"><div class="muted">Loading...</div></div>
+</div>
 <div class="panel">
 <h2>Telegram Alerts</h2>
 <form id="telegram-form">
@@ -1768,6 +1848,17 @@ async function bulkDeny(action){
  const domain=document.getElementById('deny-domain').value.trim();if(!domain){setText('bulk-result','Enter a domain.','error');return;}
  try{const d=await api('/api/denylist/bulk',{method:'POST',body:JSON.stringify({domain,action})});setText('bulk-result',action.toUpperCase()+': '+d.successes+' succeeded, '+d.failures+' failed, '+d.skipped+' skipped.','ok');refresh();}catch(e){setText('bulk-result',e.message,'error');}
 }
+async function loadConfigChanges(){
+ try{
+  const items=await api('/api/config-changes');const box=document.getElementById('config-changes');box.replaceChildren();
+  if(!items.length){box.textContent='No configuration changes detected.';return;}
+  for(const x of items.slice(0,20)){
+   const row=document.createElement('div');row.className='account';
+   const title=document.createElement('div');title.textContent=x.profile_id+' · '+x.change_type+' · '+formatDateTime(x.changed_at);
+   const b=document.createElement('button');b.className='neutral';b.textContent=x.undone_at?'Undone':'Undo';b.disabled=!!x.undone_at;b.onclick=async()=>{try{await api('/api/config-changes/'+x.id+'/undo',{method:'POST'});refresh()}catch(e){alert(e.message)}};row.append(title,b);box.append(row);
+  }
+ }catch(e){}
+}
 async function loadAlertLogSettings(){
  try{
   const d=await api('/api/settings/alert-logs');
@@ -1827,7 +1918,7 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
-detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();refresh();setInterval(refresh,5000);
+detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();refresh();setInterval(()=>{refresh();loadConfigChanges()},5000);
 </script>
 </body>
 </html>"""
@@ -1855,6 +1946,29 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
     @app.get("/api/alerts")
     def api_alerts() -> Any:
         return jsonify(store.recent_alerts())
+
+    @app.get("/api/config-changes")
+    def api_config_changes() -> Any:
+        return jsonify(store.config_changes())
+
+    @app.post("/api/config-changes/<int:change_id>/undo")
+    def api_config_undo(change_id:int) -> Any:
+        changes=store.config_changes(200)
+        change=next((x for x in changes if x["id"]==change_id),None)
+        if not change: return jsonify({"error":"Change not found."}),404
+        account=next((a for a in store.accounts() if a["profile_id"]==change["profile_id"]),None)
+        if not account: return jsonify({"error":"Profile is no longer configured locally."}),404
+        try:
+            before=json.loads(change["before_json"]); after=json.loads(change["after_json"])
+            client=NextDNSClient(account["api_key"])
+            current=config_snapshot(client.profile(change["profile_id"]))
+            if current!=after:
+                return jsonify({"error":"Undo refused: the profile changed again after this audit event."}),409
+            client._patch(f"/profiles/{change['profile_id']}",before)
+            store.mark_change_undone(change_id)
+            store.save_config_snapshot(change["profile_id"],before)
+            return jsonify({"undone":True})
+        except Exception as exc: return jsonify({"error":str(exc)}),400
 
     @app.get("/api/devices")
     def api_devices() -> Any:

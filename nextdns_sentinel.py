@@ -870,6 +870,9 @@ class Store:
             row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return str(row[0]) if row else default
 
+    def setting(self, key: str, default: str = "") -> str:
+        return self.get_setting(key, default)
+
     def save_alert_logs_enabled(self) -> bool:
         return self.get_setting("save_alert_logs", "true").lower() == "true"
 
@@ -1423,15 +1426,6 @@ class Store:
         return [dict(r) for r in rows]
     def live_snapshot(self) -> dict[str, Any]:
         return {"generated_at":now_iso(),"health":self.health(),"incidents":self.incidents(limit=10),"metrics":self.incident_metrics()}
-
-    def setting(self, key: str, default: str = "") -> str:
-        with self._connect() as db:
-            row=db.execute("SELECT value FROM sentinel_settings WHERE key=?",(key,)).fetchone()
-        return str(row[0]) if row else default
-
-    def set_setting(self, key: str, value: Any) -> None:
-        with self._connect() as db:
-            db.execute("INSERT INTO sentinel_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,str(value),now_iso()))
 
     def rules(self, enabled_only=False):
         q="SELECT * FROM alert_rules"

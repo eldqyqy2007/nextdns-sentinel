@@ -409,6 +409,8 @@ class NextDNSClient:
 
             response = self._get(f"/profiles/{profile_id}/denylist", params=params)
             for item in response.get("data", []):
+                if not isinstance(item, dict) or not item.get("active", True):
+                    continue
                 value = item.get("id") or item.get("domain") or item.get("name")
                 if value:
                     domains.append(normalize_domain(str(value)))

@@ -760,7 +760,8 @@ class Store:
                     last_poll_ms INTEGER NOT NULL DEFAULT 0,
                     last_success_at TEXT NOT NULL DEFAULT '',
                     last_error TEXT NOT NULL DEFAULT '',
-                    last_error_at TEXT NOT NULL DEFAULT ''
+                    last_error_at TEXT NOT NULL DEFAULT '',
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS settings (
@@ -770,6 +771,9 @@ class Store:
                 """
             )
             self._migrate_alert_columns(db)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(monitor_state)")}
+            if "consecutive_failures" not in columns:
+                db.execute("ALTER TABLE monitor_state ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS config_snapshots (
                     profile_id TEXT PRIMARY KEY,
@@ -1211,8 +1215,8 @@ class Store:
         with sqlite3.connect(self.path) as db:
             db.execute(
                 """
-                INSERT INTO monitor_state(profile_id,last_poll_ms,last_success_at,last_error,last_error_at)
-                VALUES(?,?,?,?,?)
+                INSERT INTO monitor_state(profile_id,last_poll_ms,last_success_at,last_error,last_error_at,consecutive_failures)
+                VALUES(?,?,?,?,?,?)
                 ON CONFLICT(profile_id) DO UPDATE SET
                     last_poll_ms=excluded.last_poll_ms,
                     last_success_at=CASE
@@ -1223,9 +1227,13 @@ class Store:
                     last_error_at=CASE
                         WHEN excluded.last_error='' THEN monitor_state.last_error_at
                         ELSE excluded.last_error_at
+                    END,
+                    consecutive_failures=CASE
+                        WHEN excluded.last_error='' THEN 0
+                        ELSE monitor_state.consecutive_failures+1
                     END
                 """,
-                (profile_id, last_poll_ms, utc_now() if not error else "", error, utc_now() if error else ""),
+                (profile_id, last_poll_ms, utc_now() if not error else "", error, utc_now() if error else "", 1 if error else 0),
             )
 
     def get_poll_ms(self, profile_id: str) -> int:
@@ -1333,7 +1341,14 @@ class Store:
                 for r in db.execute(
                     """
                     SELECT a.profile_id,a.name,a.active,
-                           s.last_poll_ms,s.last_success_at,s.last_error,s.last_error_at
+                           s.last_poll_ms,s.last_success_at,s.last_error,s.last_error_at,
+                           COALESCE(s.consecutive_failures,0) AS consecutive_failures,
+                           CASE
+                             WHEN a.active=0 THEN 'disabled'
+                             WHEN COALESCE(s.consecutive_failures,0)>=3 THEN 'degraded'
+                             WHEN s.last_success_at<>'' THEN 'healthy'
+                             ELSE 'starting'
+                           END AS status
                     FROM accounts a
                     LEFT JOIN monitor_state s ON s.profile_id=a.profile_id
                     ORDER BY a.name

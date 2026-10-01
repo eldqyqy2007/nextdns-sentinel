@@ -1955,7 +1955,9 @@ function filterAlerts(){
 function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
 async function api(path,options={}){
   try{
-    const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+    const headers={...(options.headers||{})};
+    if(!(options.body instanceof FormData))headers['Content-Type']=headers['Content-Type']||'application/json';
+    const r=await fetch(path,{...options,headers});
     const d=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(d.error||'HTTP '+r.status);
     return d;

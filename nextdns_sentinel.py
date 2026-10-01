@@ -2537,14 +2537,14 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="panel">
-<h2>Denylist Control</h2><div class="muted">Add or remove a domain through the NextDNS API. Bulk operations report each profile separately.</div>
-<div class="row"><input id="deny-domain" placeholder="example.com"><button class="start" onclick="bulkDeny('add')">Add to all profiles</button><button class="stop" onclick="bulkDeny('remove')">Remove from all profiles</button></div>
-<div class="status" id="bulk-result">Ready.</div>
+<div class="section-head"><div><h2>Denylist Management</h2><div class="muted">Choose exactly which monitored profile receives the change. Bulk actions are available separately when you intentionally want all active profiles.</div></div></div>
+<div class="row"><select id="deny-profile"></select><input id="deny-domain" placeholder="example.com"><button class="start" onclick="profileDeny('add')">Add to selected profile</button><button class="stop" onclick="profileDeny('remove')">Remove from selected profile</button></div>
+<div class="row"><button class="neutral" onclick="bulkDeny('add')">Add to all active profiles</button><button class="neutral" onclick="bulkDeny('remove')">Remove from all active profiles</button></div>
+<div class="status" id="bulk-result">Select a profile and enter a domain.</div>
 </div>
 <div class="panel">
-<h2>Local Denylist Cache</h2>
-<p class="muted">This list is synchronized automatically from each monitored NextDNS profile.</p>
-<div id="denylist">Select a profile to view its cached entries.</div>
+<div class="section-head"><div><h2>Profile Denylist</h2><div class="muted">Live entries fetched from the selected NextDNS profile.</div></div><button class="neutral" onclick="showSelectedDenylist()">Refresh List</button></div>
+<div id="denylist">Select a profile to view its entries.</div>
 </div>
 
 <div class="panel">
@@ -2910,15 +2910,50 @@ document.getElementById('profile-edit-form').addEventListener('submit',async e=>
 async function deleteAccount(id){if(!confirm('Delete this profile and its local state?'))return;try{await api('/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});refresh();}catch(e){alert(e.message);}}
 async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});refresh();}catch(e){alert(e.message);}}
 async function showDenylist(id){
- try{const list=await api('/api/denylist/'+encodeURIComponent(id));const box=document.getElementById('denylist');box.replaceChildren();
- const h=document.createElement('div');h.textContent=list.length+' cached entries';box.append(h);
- for(const d of list.slice(0,200)){const x=document.createElement('div');x.textContent=d;box.append(x);}
+ document.getElementById('deny-profile').value=id;
+ await showSelectedDenylist();
+}
+async function showSelectedDenylist(){
+ const id=document.getElementById('deny-profile').value;
+ if(!id){setText('denylist','Select a profile first.','error');return;}
+ try{
+  const list=await api('/api/denylist/'+encodeURIComponent(id));const box=document.getElementById('denylist');box.replaceChildren();
+  const h=document.createElement('div');h.className='muted';h.textContent=list.length+' live entries';box.append(h);
+  for(const d of list.slice(0,500)){
+   const row=document.createElement('div');row.className='mini-item';
+   const name=document.createElement('span');name.textContent=d;
+   const b=document.createElement('button');b.className='stop';b.textContent='Remove';b.onclick=()=>profileDeny('remove',d);
+   row.append(name,b);box.append(row);
+  }
  }catch(e){setText('denylist',e.message,'error');}
+}
+async function profileDeny(action,explicitDomain=''){
+ const id=document.getElementById('deny-profile').value;
+ const domain=(explicitDomain||document.getElementById('deny-domain').value).trim();
+ if(!id){setText('bulk-result','Select the target profile first.','error');return;}
+ if(!domain){setText('bulk-result','Enter a domain first.','error');return;}
+ if(!confirm((action==='add'?'Add ':'Remove ')+domain+' '+(action==='add'?'to':'from')+' the selected profile?'))return;
+ try{
+  const opts=action==='add'
+   ?{method:'POST',body:JSON.stringify({domain})}
+   :{method:'DELETE'};
+  const d=await api('/api/denylist/'+encodeURIComponent(id)+(action==='remove'?'/'+encodeURIComponent(domain):''),opts);
+  setText('bulk-result',action.toUpperCase()+' succeeded for '+id+'. '+(d.entries?.length??0)+' entries now active.','ok');
+  document.getElementById('deny-domain').value='';
+  await refresh();
+  document.getElementById('deny-profile').value=id;
+  await showSelectedDenylist();
+ }catch(e){setText('bulk-result','Action failed: '+e.message,'error');}
 }
 async function bulkDeny(action){
  if(!confirm((action==='add'?'Add':'Remove')+' this domain across all active profiles?'))return;
  const domain=document.getElementById('deny-domain').value.trim();if(!domain){setText('bulk-result','Enter a domain.','error');return;}
- try{const d=await api('/api/denylist/bulk',{method:'POST',body:JSON.stringify({domain,action})});setText('bulk-result',action.toUpperCase()+': '+d.successes+' succeeded, '+d.failures+' failed, '+d.skipped+' skipped.','ok');refresh();}catch(e){setText('bulk-result',e.message,'error');}
+ try{
+  const d=await api('/api/denylist/bulk',{method:'POST',body:JSON.stringify({domain,action})});
+  const failed=(d.results||[]).filter(x=>x.status==='failed').map(x=>(x.profile_name||x.profile_id)+': '+x.reason).join(' | ');
+  setText('bulk-result',action.toUpperCase()+': '+d.successes+' succeeded, '+d.failures+' failed, '+d.skipped+' skipped.'+(failed?' Failures: '+failed:''),d.failures?'error':'ok');
+  await refresh();
+ }catch(e){setText('bulk-result','Action failed: '+e.message,'error');}
 }
 async function loadConfigChanges(){
  try{
@@ -2969,7 +3004,10 @@ document.getElementById('save-alert-logs').addEventListener('change',e=>setAlert
 async function refresh(){
  try{
   const rt=await api('/api/runtime');setText('runtime',rt.running?'Running':'Stopped',rt.running?'ok':'muted');
-  setText('telegram-status',rt.telegram_configured?'Telegram configured.':'Telegram not configured.',rt.telegram_configured?'ok':'muted');
+  try{
+  const tg=await api('/api/settings/telegram');
+  setText('telegram-status',tg.enabled?'Enabled · @'+(tg.bot_username||'bot')+' · '+(tg.chat_title||tg.chat_id):'Disabled · No Telegram bot configured.',tg.enabled?'ok':'muted');
+ }catch(e){setText('telegram-status','Telegram status error: '+e.message,'error');}
   const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
   const cards=[
     ['Monitored Profiles',s.accounts],['Active Profiles',s.active_accounts],['Alerts Total',s.alerts],['Denylist Entries',s.denylist_entries],['Poll Interval',s.poll_interval_seconds+'s']
@@ -2982,14 +3020,28 @@ async function refresh(){
   const devices=await api('/api/devices');renderDevices(devices);
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
-  for(const a of accounts){const row=document.createElement('div');row.className='account';
-   const title=document.createElement('div');title.textContent=a.name+' · '+a.profile_id+' · '+(a.active?'Active':'Inactive');row.append(title);
-   const b=document.createElement('button');b.className=a.active?'stop':'start';b.textContent=a.active?'Disable':'Enable';b.onclick=()=>toggleAccount(a.profile_id,!a.active);row.append(b);
-   const v=document.createElement('button');v.className='neutral';v.textContent='View Denylist';v.onclick=()=>showDenylist(a.profile_id);row.append(v);
-   const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=()=>editProfile(a.profile_id);row.append(edit);
-   const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);row.append(del);box.append(row);
+  else{
+   const wrap=document.createElement('div');wrap.className='table-wrap';
+   const table=document.createElement('table');table.innerHTML='<thead><tr><th>Account</th><th>NextDNS Profile</th><th>Profile ID</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody>';
+   const body=table.querySelector('tbody');
+   for(const a of accounts){
+    const tr=document.createElement('tr');
+    [a.name,a.profile_name,a.profile_id,a.active?'Active':'Inactive'].forEach(v=>{const td=document.createElement('td');td.textContent=v||'—';tr.append(td);});
+    const actions=document.createElement('td');
+    const b=document.createElement('button');b.className=a.active?'stop':'start';b.textContent=a.active?'Disable':'Enable';b.onclick=()=>toggleAccount(a.profile_id,!a.active);
+    const v=document.createElement('button');v.className='neutral';v.textContent='Denylist';v.onclick=()=>showDenylist(a.profile_id);
+    const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=()=>editProfile(a.profile_id);
+    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);
+    actions.append(b,v,edit,del);tr.append(actions);body.append(tr);
+   }
+   wrap.append(table);box.append(wrap);
   }
-  const cfgSelect=document.getElementById('config-profile');cfgSelect.replaceChildren();for(const a of accounts){const o=document.createElement('option');o.value=a.profile_id;o.textContent=a.name+' ('+a.profile_id+')';cfgSelect.append(o);}
+  const cfgSelect=document.getElementById('config-profile');cfgSelect.replaceChildren();
+  const denySelect=document.getElementById('deny-profile');denySelect.replaceChildren();
+  for(const a of accounts){
+   const o=document.createElement('option');o.value=a.profile_id;o.textContent=a.name+' · '+a.profile_name+' ('+a.profile_id+')';cfgSelect.append(o);
+   const d=document.createElement('option');d.value=a.profile_id;d.textContent=a.name+' · '+a.profile_name+' ('+a.profile_id+')';denySelect.append(d);
+  }
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
   for(const x of alerts){
@@ -3001,7 +3053,7 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
-setupDashboardPages();showPage('overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+setupDashboardPages();showPage(localStorage.getItem('sentinel_active_page')||'overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
 function setupDashboardPages(){
  const map={
   overview:['stats','health','profile-health','event-timeline','hero-dot','runtime'],
@@ -3017,6 +3069,7 @@ function setupDashboardPages(){
  const stats=document.getElementById('stats');if(stats)stats.dataset.page='overview';
 }
 function showPage(page){
+ localStorage.setItem('sentinel_active_page',page);
  setupDashboardPages();
  document.querySelectorAll('.panel[data-page]').forEach(p=>{p.style.display=p.dataset.page===page?'block':'none'});document.querySelectorAll('.panel[data-page=""]').forEach(p=>p.style.display='none');
  const stats=document.getElementById('stats');if(stats)stats.style.display=page==='overview'?'grid':'none';

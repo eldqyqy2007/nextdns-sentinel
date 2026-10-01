@@ -765,22 +765,24 @@ class Store:
                 """
             )
             self._migrate_alert_columns(db)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS config_snapshots (
-                profile_id TEXT PRIMARY KEY,
-                snapshot TEXT NOT NULL,
-                captured_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS config_changes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id TEXT NOT NULL,
-                change_type TEXT NOT NULL,
-                before_json TEXT NOT NULL,
-                after_json TEXT NOT NULL,
-                changed_at TEXT NOT NULL,
-                undone_at TEXT NOT NULL DEFAULT ''
-            );
-        """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS config_snapshots (
+                    profile_id TEXT PRIMARY KEY,
+                    snapshot TEXT NOT NULL,
+                    captured_at TEXT NOT NULL
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS config_changes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id TEXT NOT NULL,
+                    change_type TEXT NOT NULL,
+                    before_json TEXT NOT NULL,
+                    after_json TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    undone_at TEXT NOT NULL DEFAULT ''
+                )
+            """)
 
 
     @staticmethod

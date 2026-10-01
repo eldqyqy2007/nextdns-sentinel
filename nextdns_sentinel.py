@@ -1559,7 +1559,6 @@ class NextDNSClient:
                 if response.status_code == 429:
                     retry_after = response.headers.get("Retry-After", "")
                     record_rate_limit_event(path, float(retry_after or 0) if str(retry_after).replace(".","",1).isdigit() else 0.0)
-                    record_rate_limit_event(path, float(retry_after or 0) if str(retry_after).replace(".","",1).isdigit() else 0.0)
                     try:
                         retry_delay = float(retry_after) if retry_after else 2 ** attempt
                     except (TypeError, ValueError):

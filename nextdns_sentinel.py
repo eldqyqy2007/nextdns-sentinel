@@ -1349,6 +1349,25 @@ class Store:
             ]
 
 
+    def alert_policy(self, profile_id: str, domain: str, device_id: str, alert_type: str) -> dict[str, Any]:
+        fingerprint=hashlib.sha256(f"{profile_id}|{domain}|{device_id}|{alert_type}".encode()).hexdigest()
+        maintenance=self.maintenance_active(profile_id)
+        suppression=self.suppression_active(fingerprint)
+        decision={"fingerprint":fingerprint,"suppressed":bool(maintenance or suppression),"maintenance":maintenance,"suppression":suppression,"escalate":False}
+        for rule in self.rules(True):
+            match=rule.get("rule") or {}; matched=True
+            for key,value in match.items():
+                if key in {"action","severity","cooldown_seconds","name"}: continue
+                actual={"profile_id":profile_id,"domain":domain,"device_id":device_id,"alert_type":alert_type}.get(key)
+                if actual is None or str(actual).lower()!=str(value).lower(): matched=False; break
+            if matched:
+                action=str(match.get("action","")).lower()
+                if action in {"suppress","ignore"}: decision["suppressed"]=True
+                if action=="escalate": decision["escalate"]=True
+                cooldown=match.get("cooldown_seconds")
+                if cooldown:
+                    self.add_suppression(fingerprint,int(cooldown),"Rule: "+rule["name"]); decision["suppressed"]=True
+        return decision
     def export_settings(self) -> dict[str, Any]:
         with self._connect() as db:
             rows=db.execute("SELECT key,value,updated_at FROM sentinel_settings ORDER BY key").fetchall()
@@ -2181,7 +2200,8 @@ class Sentinel:
                             domain,
                         )
                         alert_id=self.enrich_alert(key,account,domain,reason,status,matched,client_ip,event_time,device_id,device_name,device_model,protocol,encrypted)
-                        if not recently_notified:
+                        policy=self.features.alert_policy(profile_id,domain,device_id,"denylist_match") if self.features else {"suppressed":False,"escalate":False}
+                        if not recently_notified and not policy.get("suppressed"):
                             delivered = self.notify(
                                 account, domain, reason, status, matched, client_ip, event_time,
                                 device_id, device_name, device_model, protocol, encrypted, alert_id,
@@ -2192,6 +2212,9 @@ class Sentinel:
                             else:
                                 self.store.mark_notification_failed(key)
                                 if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
+                            if policy.get("escalate") and delivered:
+                                self.features.audit("notification_escalation","alert",str(alert_id or ""),profile_id,{"level":2})
+                                self.notify_report("Alert escalation",["Profile: "+account["name"],"Domain: "+domain,"Rule requested escalation."],alert_id)
                         else:
                             self.store.mark_alert_suppressed(key)
                             if self.features and alert_id: self.features.delivery(alert_id,"telegram","suppressed")

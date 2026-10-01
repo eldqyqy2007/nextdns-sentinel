@@ -354,24 +354,60 @@ class NextDNSClient:
         return self._get("/profiles").get("data", [])
 
     def denylist(self, profile_id: str) -> list[str]:
-        values = self._get(f"/profiles/{profile_id}/denylist").get("data", [])
         domains: list[str] = []
-        for item in values:
-            value = item.get("id") or item.get("domain") or item.get("name")
-            if value:
-                domains.append(normalize_domain(str(value)))
+        cursor: str | None = None
+
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+
+            response = self._get(f"/profiles/{profile_id}/denylist", params=params)
+            for item in response.get("data", []):
+                value = item.get("id") or item.get("domain") or item.get("name")
+                if value:
+                    domains.append(normalize_domain(str(value)))
+
+            cursor = (
+                response.get("meta", {})
+                .get("pagination", {})
+                .get("cursor")
+            )
+            if not cursor:
+                break
+
         return domains
 
     def logs(self, profile_id: str, from_ms: int) -> list[dict[str, Any]]:
-        values = self._get(
-            f"/profiles/{profile_id}/logs",
-            params={"limit": 100, "from": from_ms},
-        ).get("data", [])
-        if len(values) >= 100:
-            logging.warning(
-                "NextDNS returned 100 log entries for profile %s. "
-                "The API limit may have been reached; reduce the polling interval "
-                "or investigate pagination if your profile has high DNS volume.",
+        values: list[dict[str, Any]] = []
+        cursor: str | None = None
+        from_value = str(from_ms)
+
+        while True:
+            params: dict[str, Any] = {
+                "limit": 1000,
+                "from": from_value,
+                "sort": "asc",
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            response = self._get(f"/profiles/{profile_id}/logs", params=params)
+            page = response.get("data", [])
+            values.extend(page)
+
+            cursor = (
+                response.get("meta", {})
+                .get("pagination", {})
+                .get("cursor")
+            )
+            if not cursor:
+                break
+
+        if len(values) >= 1000:
+            logging.info(
+                "Fetched %d log entries for profile %s using pagination.",
+                len(values),
                 profile_id,
             )
         return values
@@ -406,7 +442,12 @@ def event_domain(log: dict[str, Any]) -> str:
 
 def matched_domain(log: dict[str, Any]) -> str:
     return normalize_domain(
-        str(log.get("matched_name") or log.get("matchedDomain") or "")
+        str(
+            log.get("matched_name")
+            or log.get("matchedDomain")
+            or log.get("root")
+            or ""
+        )
     )
 
 
@@ -417,7 +458,17 @@ def event_status(log: dict[str, Any]) -> str:
 def event_reason(log: dict[str, Any]) -> str:
     reasons = log.get("reasons") or log.get("reason") or ""
     if isinstance(reasons, list):
-        return ", ".join(str(x) for x in reasons if x)
+        names: list[str] = []
+        for item in reasons:
+            if isinstance(item, dict):
+                value = item.get("name") or item.get("id")
+            else:
+                value = item
+            if value:
+                names.append(str(value))
+        return ", ".join(names)
+    if isinstance(reasons, dict):
+        return str(reasons.get("name") or reasons.get("id") or "")
     return str(reasons).strip()
 
 
@@ -425,7 +476,11 @@ def event_client_ip(log: dict[str, Any]) -> str:
     client = log.get("client")
     if isinstance(client, dict):
         return str(client.get("ip") or "").strip()
-    return str(log.get("client_ip") or "").strip()
+    return str(
+        log.get("clientIp")
+        or log.get("client_ip")
+        or ""
+    ).strip()
 
 
 def event_key(profile_id: str, log: dict[str, Any]) -> str:

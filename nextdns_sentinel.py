@@ -2963,12 +2963,17 @@ document.getElementById('profile-edit-form').addEventListener('submit',async e=>
   try{
     await api('/api/accounts/'+encodeURIComponent(editingProfileId),{method:'PATCH',body:JSON.stringify(data)});
     closeProfileEditor();
-    refresh();
-  }catch(err){setText('profile-edit-message',err.message,'error');}
+    await refresh();
+    setText('profile-edit-message','Profile changes saved successfully.','ok');
+  }catch(err){setText('profile-edit-message','Save failed: '+err.message,'error');}
 });
 
-async function deleteAccount(id){if(!confirm('Delete this profile and its local state?'))return;try{await api('/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});refresh();}catch(e){alert(e.message);}}
-async async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});await refresh();setText('account-message',active?'Profile enabled successfully.':'Profile disabled successfully.','ok');}catch(e){setText('account-message','Action failed: '+e.message,'error');}}
+async function deleteAccount(id){
+ if(!confirm('Delete this profile and its local state?'))return;
+ try{await api('/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});await refresh();setText('account-message','Profile deleted successfully.','ok');}
+ catch(e){setText('account-message','Delete failed: '+e.message,'error');}
+}
+async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});await refresh();setText('account-message',active?'Profile enabled successfully.':'Profile disabled successfully.','ok');}catch(e){setText('account-message','Action failed: '+e.message,'error');}}
 async function showDenylist(id){
  document.getElementById('deny-profile').value=id;
  await showSelectedDenylist();

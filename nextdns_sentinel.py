@@ -2585,6 +2585,7 @@ DASHBOARD = """<!doctype html>
 <button class="neutral" type="button" onclick="testTelegram()">Send Test</button>
 <button class="start" type="button" onclick="enableTelegram()">Enable</button>
 <button class="stop" type="button" onclick="disableTelegram()">Disable</button>
+<button class="stop" type="button" onclick="deleteTelegramCredentials()">Delete Bot</button>
 <button class="neutral" type="button" onclick="editTelegram()">Edit Bot</button>
 </form>
 <div class="status" id="telegram-status">Checking...</div>
@@ -2958,6 +2959,7 @@ document.getElementById('telegram-form').addEventListener('submit',async e=>{
  try{await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});setText('telegram-status','Telegram configured and encrypted locally.','ok');e.target.reset();refresh();}
  catch(err){setText('telegram-status',err.message,'error');}
 });
+async function deleteTelegramCredentials(){if(!confirm('Delete the saved Telegram bot token and chat ID from Sentinel?'))return;try{await api('/api/settings/telegram/credentials',{method:'DELETE'});setText('telegram-status','Telegram credentials deleted.','muted');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
 async function enableTelegram(){try{const d=await api('/api/settings/telegram/enable',{method:'POST'});setText('telegram-status','Enabled · '+(d.status||'ready'),'ok');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});closeTelegramEditor();setText('telegram-status','Telegram disabled. Saved bot credentials were kept.','muted');refresh();}catch(e){setText('telegram-status',e.message,'error');}}

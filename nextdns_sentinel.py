@@ -1384,6 +1384,8 @@ class Sentinel:
 
         while self.stop_event is None or not self.stop_event.is_set():
             try:
+                if self.features:
+                    self.features.heartbeat("running", {"profile_id": profile_id})
                 iteration += 1
                 if iteration == 1 or iteration % 20 == 0:
                     try:
@@ -1560,6 +1562,8 @@ class Sentinel:
             )
 
         self.stop_event = threading.Event()
+        if self.features:
+            self.features.heartbeat("starting", {"profiles": len(accounts)})
         self.threads = [
             threading.Thread(
                 target=self.monitor_account,
@@ -1590,6 +1594,8 @@ class Sentinel:
             thread.join(timeout=CHECK_INTERVAL + 5)
         self.threads = None
         self.stop_event = None
+        if self.features:
+            self.features.heartbeat("stopped")
         logging.info("Stopped %s.", APP_NAME)
 
     def run(self) -> None:

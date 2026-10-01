@@ -2524,7 +2524,7 @@ DASHBOARD = """<!doctype html>
 <div class="panel"><h3>Alert Rules</h3><div class="row"><input id="rule-name" placeholder="Rule name"><input id="rule-json" placeholder='{"action":"suppress","domain":"example.com"}'><button class="start" onclick="saveRule()">Save Rule</button></div><div id="rules-list" class="mini-list"></div></div>
 <div class="panel"><h3>Maintenance / Suppression</h3><div class="row"><input id="maintenance-seconds" type="number" min="60" value="3600"><input id="maintenance-reason" placeholder="Reason"><button class="neutral" onclick="enableMaintenance()">Enable Maintenance</button></div><div class="row"><input id="suppression-fingerprint" placeholder="Fingerprint"><input id="suppression-seconds" type="number" min="30" value="600"><button class="neutral" onclick="addSuppression()">Suppress</button></div></div>
 </div>
-<div class="row"><button class="neutral" onclick="toggleSafeMode()">Toggle Safe Mode</button><button class="neutral" onclick="loadDiagnostics()">Diagnostics</button><button class="neutral" onclick="loadIncidentMetrics()">Incident Metrics</button><button class="neutral" onclick="loadRateLimits()">Rate Limits</button></div>
+<div class="row"><button class="neutral" onclick="toggleSafeMode()">Toggle Safe Mode</button><button class="neutral" onclick="loadDiagnostics()">Diagnostics</button><button class="neutral" onclick="loadIncidentMetrics()">Incident Metrics</button><button class="neutral" onclick="loadRateLimits()">Rate Limits</button><input id="api-auth-token" type="password" placeholder="API token (16+ chars)"><button class="neutral" onclick="configureApiAuth()">Enable/Login API Auth</button><button class="neutral" onclick="logoutApiAuth()">Logout</button></div>
 <div id="control-details" class="mini-list"></div>
 </div>
 
@@ -2746,6 +2746,13 @@ async function api(path,options={}){
     if(!(options.body instanceof FormData))headers['Content-Type']=headers['Content-Type']||'application/json';
     const r=await fetch(path,{...options,headers});
     const d=await r.json().catch(()=>({}));
+    if(r.status===401 && !options._authRetry){
+      const token=window.prompt('Sentinel API authentication is enabled. Enter your API token:');
+      if(token){
+        const login=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
+        if(login.ok)return api(path,Object.assign({},options,{_authRetry:true}));
+      }
+    }
     if(!r.ok)throw new Error(d.error||'HTTP '+r.status);
     return d;
   }catch(e){
@@ -2952,6 +2959,11 @@ async function refresh(){
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
 detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+async function configureApiAuth(){
+ const token=document.getElementById('api-auth-token').value.trim();if(!token)return alert('Enter an API token.');
+ try{const d=await api('/api/auth/configure',{method:'POST',body:JSON.stringify({token})});setText('control-details',d.enabled?'API authentication enabled.':'API authentication unchanged.','ok');document.getElementById('api-auth-token').value='';}catch(e){setText('control-details',e.message,'error')}
+}
+async function logoutApiAuth(){try{await api('/api/auth/logout',{method:'POST'});setText('control-details','API session logged out.','muted')}catch(e){setText('control-details',e.message,'error')}}
 async function loadControlCenter(){
  try{
   const d=await api('/api/control-center');const box=document.getElementById('control-summary');box.replaceChildren();

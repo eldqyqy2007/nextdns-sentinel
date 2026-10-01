@@ -31,7 +31,6 @@ A local-first monitoring utility for **NextDNS profiles you own or administer**.
 - [Security model](#security-model)
 - [Project structure](#project-structure)
 - [Limitations](#limitations)
-- [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -61,9 +60,9 @@ Sentinel is built for defensive visibility over NextDNS configurations you are a
                          NextDNS API
                              |
               +--------------+--------------+
-              |              |              |
-           Profiles       Denylist         Logs
-              |              |              |
+              |              |
+           Denylist         Logs
+              |              |
               +--------------+--------------+
                              |
                              v
@@ -175,6 +174,10 @@ Keep the Fernet key outside Git and back it up securely. Losing it means stored 
 | `NEXTDNS_SENTINEL_POLL_OVERLAP_MS` | `5000` | Poll overlap |
 | `NEXTDNS_SENTINEL_ALERT_COOLDOWN` | `300` | Telegram cooldown per profile/domain |
 | `NEXTDNS_SENTINEL_API_RETRIES` | `3` | API retry attempts |
+| `NEXTDNS_SENTINEL_NOTIFICATION_RETRY_BASE` | `30` | Initial notification retry delay in seconds |
+| `NEXTDNS_SENTINEL_NOTIFICATION_RETRY_MAX` | `900` | Maximum notification retry delay in seconds |
+| `NEXTDNS_SENTINEL_MAX_NOTIFICATION_ATTEMPTS` | `10` | Maximum notification attempts per alert |
+| `NEXTDNS_SENTINEL_ALERT_RETENTION_DAYS` | `90` | Retention period for completed alerts |
 | `NEXTDNS_SENTINEL_HTTP_TIMEOUT` | `10` | HTTP timeout |
 | `NEXTDNS_SENTINEL_HOST` | `127.0.0.1` | Dashboard bind address |
 | `NEXTDNS_SENTINEL_PORT` | `5000` | Dashboard port |
@@ -198,7 +201,7 @@ If you intentionally bind to a non-localhost address, add network controls/authe
 
 ## <img src="./assets/icons/dashboard.svg" alt="" width="24" height="24" align="absmiddle"> Web dashboard
 
-The dashboard shows account counts, denylist size, alert count, monitor health, last successful poll/error, and recent events including matched domain, status, reason, and client IP when available.
+The dashboard shows account counts, denylist size, alert count, monitor health, last successful poll/error timestamps, and recent events including event time, detection time, matched domain, status, reason, notification state, retry attempts, and client IP when available.
 
 It uses DOM-safe rendering for event data rather than inserting API values as raw HTML.
 
@@ -235,16 +238,6 @@ nextdns-sentinel/
 ├── LICENSE
 └── README.md
 ```
-
-## <img src="./assets/icons/limits.svg" alt="" width="24" height="24" align="absmiddle"> Limitations
-
-- NextDNS API availability and response format can change.
-- Polling is not a provider-side streaming connection.
-- The logs endpoint currently requests up to 100 records per cycle; very high-volume profiles may require a shorter interval or future pagination/cursor support.
-- SQLite is local persistence, not a distributed database.
-- Telegram is best-effort; monitoring continues if notification delivery fails.
-- Losing the Fernet key makes stored API keys unrecoverable.
-- The dashboard is lightweight and intentionally does not implement user authentication.
 
 ## <img src="./assets/icons/contributing.svg" alt="" width="24" height="24" align="absmiddle"> Contributing
 

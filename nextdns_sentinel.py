@@ -794,7 +794,7 @@ class Sentinel:
         denylist: set[str] = set()
         iteration = 0
 
-        while not self.stop_event or not self.stop_event.is_set():
+        while self.stop_event is None or not self.stop_event.is_set():
             try:
                 iteration += 1
                 if iteration == 1 or iteration % 20 == 0:

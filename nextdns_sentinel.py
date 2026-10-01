@@ -3134,6 +3134,11 @@ function showActionToast(message,type='error'){
  e.textContent=message;e.className='toast show '+type;clearTimeout(window.__toastTimer);
  window.__toastTimer=setTimeout(()=>{e.className='toast';},5000);
 }
+let autoRefreshTimer=null;
+function scheduleAutoRefresh(){
+ clearTimeout(autoRefreshTimer);
+ autoRefreshTimer=setTimeout(()=>refresh().catch(()=>{}),120);
+}
 async function api(path,options={}){
   try{
     const headers={...(options.headers||{})};
@@ -3148,6 +3153,8 @@ async function api(path,options={}){
       }
     }
     if(!r.ok)throw new Error(d.error||'HTTP '+r.status);
+    const method=String(options.method||'GET').toUpperCase();
+    if(['POST','PATCH','PUT','DELETE'].includes(method) && !options._skipAutoRefresh) scheduleAutoRefresh();
     return d;
   }catch(e){
     const error=e instanceof TypeError?new Error('Dashboard could not reach the local API. Make sure Sentinel is running and try again.'):e;

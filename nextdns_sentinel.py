@@ -854,6 +854,37 @@ class NextDNSClient:
                 time.sleep(delay)
         raise NextDNSError(f"NextDNS request failed for {path}.")
 
+    def _request_mutation(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        url=f"{self.BASE}{path}"
+        for attempt in range(API_RETRIES+1):
+            try:
+                response=self.session.request(method,url,json=payload,timeout=HTTP_TIMEOUT)
+                if response.status_code==429 and attempt<API_RETRIES:
+                    time.sleep(min(float(response.headers.get("Retry-After","2")),60)); continue
+                if response.status_code>=500 and attempt<API_RETRIES:
+                    time.sleep(min(2**attempt,30)); continue
+                if not response.ok:
+                    raise NextDNSError(f"NextDNS API returned HTTP {response.status_code} for {path}. Response: {response.text.strip()[:500]}")
+                if response.status_code==204 or not response.content: return {}
+                data=response.json()
+                if data.get("errors"):
+                    raise NextDNSError("NextDNS API returned application errors for %s: %s"%(path,json.dumps(data["errors"],ensure_ascii=False)[:500]))
+                return data if isinstance(data,dict) else {}
+            except (requests.RequestException,ValueError) as exc:
+                if attempt>=API_RETRIES: raise NextDNSError(f"NextDNS mutation failed for {path}: {exc}") from exc
+                time.sleep(min(2**attempt,30))
+        raise NextDNSError(f"NextDNS mutation failed for {path}.")
+
+    def add_denylist(self, profile_id: str, domain: str) -> None:
+        domain=normalize_domain(domain)
+        if not domain: raise NextDNSError("A domain is required.")
+        self._request_mutation("POST",f"/profiles/{profile_id}/denylist",{"id":domain,"active":True})
+
+    def remove_denylist(self, profile_id: str, domain: str) -> None:
+        domain=normalize_domain(domain)
+        if not domain: raise NextDNSError("A domain is required.")
+        self._request_mutation("DELETE",f"/profiles/{profile_id}/denylist/{domain}")
+
     def profiles(self) -> list[dict[str, Any]]:
         """Return profiles visible to the API key using the account profiles endpoint."""
         values: list[dict[str, Any]] = []
@@ -1474,6 +1505,11 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="panel">
+<h2>Denylist Control</h2><div class="muted">Add or remove a domain through the NextDNS API. Bulk operations report each profile separately.</div>
+<div class="row"><input id="deny-domain" placeholder="example.com"><button class="start" onclick="bulkDeny('add')">Add to all profiles</button><button class="stop" onclick="bulkDeny('remove')">Remove from all profiles</button></div>
+<div class="status" id="bulk-result">Ready.</div>
+</div>
+<div class="panel">
 <h2>Local Denylist Cache</h2>
 <p class="muted">This list is synchronized automatically from each monitored NextDNS profile.</p>
 <div id="denylist">Select a profile to view its cached entries.</div>
@@ -1728,6 +1764,10 @@ async function showDenylist(id){
  for(const d of list.slice(0,200)){const x=document.createElement('div');x.textContent=d;box.append(x);}
  }catch(e){setText('denylist',e.message,'error');}
 }
+async function bulkDeny(action){
+ const domain=document.getElementById('deny-domain').value.trim();if(!domain){setText('bulk-result','Enter a domain.','error');return;}
+ try{const d=await api('/api/denylist/bulk',{method:'POST',body:JSON.stringify({domain,action})});setText('bulk-result',action.toUpperCase()+': '+d.successes+' succeeded, '+d.failures+' failed, '+d.skipped+' skipped.','ok');refresh();}catch(e){setText('bulk-result',e.message,'error');}
+}
 async function loadAlertLogSettings(){
  try{
   const d=await api('/api/settings/alert-logs');
@@ -1889,6 +1929,44 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
         if not store.account_exists(profile_id):
             return jsonify({"error": "Account not found."}), 404
         return jsonify(store.denylist_entries(profile_id))
+
+    @app.post("/api/denylist/<profile_id>")
+    def api_denylist_add(profile_id: str) -> Any:
+        data=request_json(); domain=normalize_domain(str(data.get("domain","")))
+        account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
+        if not account: return jsonify({"error":"Account not found."}),404
+        try:
+            client=NextDNSClient(account["api_key"]); client.add_denylist(profile_id,domain)
+            current=client.denylist(profile_id); store.replace_denylist(profile_id,current)
+            return jsonify({"saved":True,"domain":domain,"entries":current})
+        except Exception as exc: return jsonify({"error":str(exc)}),400
+
+    @app.delete("/api/denylist/<profile_id>/<path:domain>")
+    def api_denylist_remove(profile_id: str, domain: str) -> Any:
+        account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
+        if not account: return jsonify({"error":"Account not found."}),404
+        try:
+            client=NextDNSClient(account["api_key"]); client.remove_denylist(profile_id,domain)
+            current=client.denylist(profile_id); store.replace_denylist(profile_id,current)
+            return jsonify({"removed":True,"domain":normalize_domain(domain),"entries":current})
+        except Exception as exc: return jsonify({"error":str(exc)}),400
+
+    @app.post("/api/denylist/bulk")
+    def api_denylist_bulk() -> Any:
+        data=request_json(); domain=normalize_domain(str(data.get("domain",""))); action=str(data.get("action","")).lower()
+        if action not in {"add","remove"} or not domain: return jsonify({"error":"Provide domain and action=add|remove."}),400
+        results=[]
+        for account in store.accounts():
+            if not account["active"]:
+                results.append({"profile_id":account["profile_id"],"profile_name":account["profile_name"],"status":"skipped","reason":"Profile is inactive."}); continue
+            try:
+                client=NextDNSClient(account["api_key"])
+                (client.add_denylist if action=="add" else client.remove_denylist)(account["profile_id"],domain)
+                current=client.denylist(account["profile_id"]); store.replace_denylist(account["profile_id"],current)
+                results.append({"profile_id":account["profile_id"],"profile_name":account["profile_name"],"status":"success","reason":"API operation completed."})
+            except Exception as exc:
+                results.append({"profile_id":account["profile_id"],"profile_name":account["profile_name"],"status":"failed","reason":str(exc)})
+        return jsonify({"domain":domain,"action":action,"results":results,"successes":sum(r["status"]=="success" for r in results),"failures":sum(r["status"]=="failed" for r in results),"skipped":sum(r["status"]=="skipped" for r in results)})
 
     @app.post("/api/monitor/start")
     def api_monitor_start() -> Any:

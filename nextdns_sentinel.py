@@ -4526,11 +4526,21 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/risk-history")
     def api_risk_history() -> Any:
-        return jsonify(features.risk_history(request.args.get("profile_id",""),int(request.args.get("days","30"))))
+        method=getattr(features,"risk_history",None)
+        if not callable(method): return jsonify([])
+        try: return jsonify(method(request.args.get("profile_id",""),int(request.args.get("days","30"))))
+        except Exception:
+            logging.exception("Risk history load failed")
+            return jsonify([])
 
     @app.get("/api/baseline")
     def api_baseline() -> Any:
-        return jsonify(features.baseline_view(request.args.get("profile_id","")))
+        method=getattr(features,"baseline_view",None)
+        if not callable(method): return jsonify([])
+        try: return jsonify(method(request.args.get("profile_id","")))
+        except Exception:
+            logging.exception("Baseline load failed")
+            return jsonify([])
     @app.get("/api/live")
     def api_live() -> Any:
         return jsonify(features.live_snapshot())

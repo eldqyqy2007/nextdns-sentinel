@@ -22,6 +22,7 @@ import sqlite3
 import threading
 import time
 import tempfile
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1346,6 +1347,46 @@ class Store:
                 )
             ]
 
+
+    def export_settings(self) -> dict[str, Any]:
+        with self._connect() as db:
+            rows=db.execute("SELECT key,value,updated_at FROM sentinel_settings ORDER BY key").fetchall()
+            rules=db.execute("SELECT id,name,enabled,rule_json,created_at,updated_at FROM alert_rules ORDER BY id").fetchall()
+        return {"version":1,"exported_at":now_iso(),"settings":[dict(r) for r in rows],"rules":[{**dict(r),"rule":_loads(r["rule_json"],{})} for r in rules]}
+
+    def import_settings(self, payload: dict[str, Any]) -> dict[str, int]:
+        imported_settings=0; imported_rules=0
+        with self._connect() as db:
+            for item in payload.get("settings", []):
+                key=str(item.get("key","")).strip()
+                if not key or "token" in key.lower() or "api_key" in key.lower(): continue
+                db.execute("INSERT INTO sentinel_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,str(item.get("value","")),now_iso())); imported_settings+=1
+            for item in payload.get("rules", []):
+                name=str(item.get("name","")).strip()
+                if not name: continue
+                db.execute("INSERT INTO alert_rules(name,enabled,rule_json,created_at,updated_at) VALUES(?,?,?,?,?)",(name,int(bool(item.get("enabled",True))),json.dumps(item.get("rule") or {}),now_iso(),now_iso())); imported_rules+=1
+        return {"settings":imported_settings,"rules":imported_rules}
+
+    def incident_metrics(self) -> dict[str, Any]:
+        with self._connect() as db:
+            total=db.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+            open_count=db.execute("SELECT COUNT(*) FROM incidents WHERE status IN ('open','investigating')").fetchone()[0]
+            resolved=db.execute("SELECT COUNT(*) FROM incidents WHERE status='resolved'").fetchone()[0]
+            avg_row=db.execute("SELECT AVG((julianday(resolved_at)-julianday(first_seen_at))*86400) FROM incidents WHERE status='resolved' AND resolved_at<>''").fetchone()
+            alert_count=db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+        return {"total_incidents":total,"open_incidents":open_count,"resolved_incidents":resolved,"mean_time_to_resolve_seconds":round(float(avg_row[0] or 0),1),"total_alerts":alert_count}
+
+    def config_diff(self, profile_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row=db.execute("SELECT before_json,after_json,change_type,created_at,undone_at FROM config_changes WHERE profile_id=? ORDER BY id DESC LIMIT 1",(profile_id,)).fetchone()
+        if not row: return {"profile_id":profile_id,"changed":False,"diff":[]}
+        before=_loads(row["before_json"],{}); after=_loads(row["after_json"],{}); diff=[]
+        for key in sorted(set(before)|set(after)):
+            if before.get(key)!=after.get(key): diff.append({"field":key,"before":before.get(key),"after":after.get(key)})
+        return {"profile_id":profile_id,"changed":bool(diff),"diff":diff,"change_type":row["change_type"],"created_at":row["created_at"],"undone_at":row["undone_at"]}
+
+    def live_snapshot(self) -> dict[str, Any]:
+        return {"generated_at":now_iso(),"health":self.health(),"incidents":self.incidents(limit=10),"metrics":self.incident_metrics()}
 
     def setting(self, key: str, default: str = "") -> str:
         with self._connect() as db:
@@ -3457,6 +3498,28 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             return jsonify({"error": "Telegram test notification failed."}), 502
         return jsonify({"sent": True})
 
+    @app.get("/api/live")
+    def api_live() -> Any:
+        return jsonify(features.live_snapshot())
+
+    @app.get("/api/incident-metrics")
+    def api_incident_metrics() -> Any:
+        return jsonify(features.incident_metrics())
+
+    @app.get("/api/config-diff/<profile_id>")
+    def api_config_diff(profile_id:str)->Any:
+        return jsonify(features.config_diff(profile_id))
+
+    @app.get("/api/settings/export")
+    def api_settings_export() -> Any:
+        return jsonify(features.export_settings())
+
+    @app.post("/api/settings/import")
+    def api_settings_import() -> Any:
+        data=request_json()
+        if not isinstance(data,dict): return jsonify({"error":"Invalid settings document."}),400
+        result=features.import_settings(data); features.audit("settings_import","settings","local",details=result)
+        return jsonify({"imported":result})
     @app.get("/api/control-center")
     def api_control_center() -> Any:
         return jsonify({

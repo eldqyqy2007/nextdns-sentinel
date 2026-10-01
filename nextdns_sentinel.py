@@ -97,7 +97,8 @@ class Store:
                     event_timestamp TEXT NOT NULL DEFAULT '',
                     event_key TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL,
-                    notified_at TEXT NOT NULL DEFAULT ''
+                    notified_at TEXT NOT NULL DEFAULT '',
+                    notification_status TEXT NOT NULL DEFAULT 'pending'
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_alerts_created_at
@@ -126,7 +127,9 @@ class Store:
         if "notified_at" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN notified_at TEXT NOT NULL DEFAULT ''")
         if "event_timestamp" not in columns:
-            db.execute("ALTER TABLE alerts ADD COLUMN event_timestamp TEXT NOT NULL DEFAULT ''")
+            db.execute("ALTER TABLE alerts ADD COLUMN event_timestamp TEXT NOT NULL DEFAULT '')
+        if "notification_status" not in columns:
+            db.execute("ALTER TABLE alerts ADD COLUMN notification_status TEXT NOT NULL DEFAULT 'pending'")
 
     def upsert_account(self, account: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as db:
@@ -244,8 +247,19 @@ class Store:
     def mark_alert_notified(self, event_key: str) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute(
-                "UPDATE alerts SET notified_at=? WHERE event_key=?",
+                """
+                UPDATE alerts
+                SET notified_at=?, notification_status='sent'
+                WHERE event_key=?
+                """,
                 (utc_now(), event_key),
+            )
+
+    def mark_alert_suppressed(self, event_key: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE alerts SET notification_status='suppressed' WHERE event_key=?",
+                (event_key,),
             )
 
     def cleanup_alerts(self, retention_days: int) -> int:
@@ -276,6 +290,7 @@ class Store:
                            client_ip,event_timestamp
                     FROM alerts
                     WHERE profile_id=? AND notified_at=''
+                      AND notification_status='pending'
                     ORDER BY id ASC LIMIT ?
                     """,
                     (profile_id, limit),
@@ -792,6 +807,7 @@ Client IP: {client_ip}"
                             if delivered:
                                 self.store.mark_alert_notified(key)
                         else:
+                            self.store.mark_alert_suppressed(key)
                             logging.info(
                                 "Telegram notification suppressed by cooldown for %s",
                                 domain,

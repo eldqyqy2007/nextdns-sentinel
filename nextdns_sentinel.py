@@ -2484,6 +2484,7 @@ DASHBOARD = """<!doctype html>
 <label>Chat ID<input name="chat_id" placeholder="Telegram chat ID"></label>
 <button class="start" type="submit">Save Telegram</button>
 <button class="neutral" type="button" onclick="testTelegram()">Send Test</button>
+<button class="start" type="button" onclick="enableTelegram()">Enable</button>
 <button class="stop" type="button" onclick="disableTelegram()">Disable</button>
 <button class="neutral" type="button" onclick="editTelegram()">Edit Bot</button>
 </form>
@@ -2851,7 +2852,8 @@ document.getElementById('telegram-form').addEventListener('submit',async e=>{
  catch(err){setText('telegram-status',err.message,'error');}
 });
 async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
-async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});closeTelegramEditor();setText('telegram-status','Telegram disabled.','muted');}catch(e){setText('telegram-status',e.message,'error');}}
+async function enableTelegram(){try{const d=await api('/api/settings/telegram/enable',{method:'POST'});setText('telegram-status','Enabled · '+(d.status||'ready'),'ok');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
+async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});closeTelegramEditor();setText('telegram-status','Telegram disabled. Saved bot credentials were kept.','muted');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function editTelegram(){
  try{
   const d=await api('/api/settings/telegram');
@@ -3039,7 +3041,7 @@ async function refresh(){
   const rt=await api('/api/runtime');setText('runtime',rt.running?'Running':'Stopped',rt.running?'ok':'muted');
   try{
   const tg=await api('/api/settings/telegram');
-  setText('telegram-status',tg.enabled?'Enabled · @'+(tg.bot_username||'bot')+' · '+(tg.chat_title||tg.chat_id):'Disabled · No Telegram bot configured.',tg.enabled?'ok':'muted');
+  setText('telegram-status',tg.enabled?'Enabled · @'+(tg.bot_username||'bot')+' · '+(tg.chat_title||tg.chat_id):(tg.configured?'Disabled · Saved bot available to enable.':'Disabled · No Telegram bot configured.'),tg.enabled?'ok':'muted');
  }catch(e){setText('telegram-status','Telegram status error: '+e.message,'error');}
   const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
   const cards=[
@@ -3800,6 +3802,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             store.set_setting("telegram_bot_username", str(identity["bot"].get("username") or ""))
             store.set_setting("telegram_bot_name", str(identity["bot"].get("first_name") or ""))
             store.set_setting("telegram_chat_title", str(identity["chat"].get("title") or identity["chat"].get("first_name") or identity["chat"].get("username") or ""))
+            store.set_setting("telegram_enabled", "1")
             sentinel.telegram_token = token
             sentinel.telegram_chat_id = chat_id
             features.audit("telegram_configured","settings","telegram",details={"chat_id":chat_id})
@@ -3813,8 +3816,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         chat_id = store.get_secret("telegram_chat_id")
         return jsonify({
             "configured": bool(token and chat_id),
-            "enabled": bool(token and chat_id),
-            "status": "enabled" if token and chat_id else "disabled",
+            "enabled": bool(token and chat_id and store.setting("telegram_enabled","1")=="1"),
+            "status": "enabled" if token and chat_id and store.setting("telegram_enabled","1")=="1" else "disabled",
             "chat_id": chat_id,
             "token_configured": bool(token),
             "bot_username": store.setting("telegram_bot_username", ""),
@@ -3822,22 +3825,38 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             "chat_title": store.setting("telegram_chat_title", ""),
         })
 
+    @app.post("/api/settings/telegram/enable")
+    def api_telegram_enable() -> Any:
+        token = store.get_secret("telegram_token")
+        chat_id = store.get_secret("telegram_chat_id")
+        if not token or not chat_id:
+            return jsonify({"error":"No saved Telegram credentials exist. Save a bot first."}),400
+        try:
+            validate_telegram_credentials(token,chat_id)
+            store.set_setting("telegram_enabled","1")
+            sentinel.telegram_token=token
+            sentinel.telegram_chat_id=chat_id
+            features.audit("telegram_enabled","settings","telegram")
+            return jsonify({"enabled":True,"status":"enabled"})
+        except Exception as exc:
+            return jsonify({"error":str(exc)}),400
+
     @app.delete("/api/settings/telegram")
     def api_telegram_delete() -> Any:
-        store.delete_secret("telegram_token")
-        store.delete_secret("telegram_chat_id")
-        store.set_setting("telegram_bot_username", "")
-        store.set_setting("telegram_bot_name", "")
-        store.set_setting("telegram_chat_title", "")
+        token = store.get_secret("telegram_token")
+        chat_id = store.get_secret("telegram_chat_id")
+        if not token or not chat_id:
+            return jsonify({"configured":False,"enabled":False,"status":"disabled"})
+        store.set_setting("telegram_enabled","0")
         sentinel.telegram_token = ""
         sentinel.telegram_chat_id = ""
         features.audit("telegram_disabled","settings","telegram")
-        return jsonify({"configured": False})
+        return jsonify({"configured":True,"enabled":False,"status":"disabled"})
 
     @app.post("/api/settings/telegram/test")
     def api_telegram_test() -> Any:
-        if not sentinel.telegram_token or not sentinel.telegram_chat_id:
-            return jsonify({"error": "Telegram is not configured."}), 400
+        if not sentinel.telegram_token or not sentinel.telegram_chat_id or store.setting("telegram_enabled","1")!="1":
+            return jsonify({"error": "Telegram is disabled or not configured. Enable the bot first."}), 400
         ok = send_telegram(
             sentinel.telegram_token,
             sentinel.telegram_chat_id,

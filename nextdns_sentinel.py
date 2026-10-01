@@ -2620,6 +2620,7 @@ function exportJson(){window.open('/api/export/json','_blank');}
 function exportCsv(){window.open('/api/export/csv','_blank');}
 function downloadBackup(){window.open('/api/backup','_blank');}
 document.getElementById('restore-form').addEventListener('submit',async e=>{
+ if(!confirm('Restore the selected SQLite backup? Sentinel will create a rollback copy first.')){e.preventDefault();return;}
  e.preventDefault();const file=document.getElementById('restore-file').files[0];if(!file){setText('restore-status','Select a backup file first.','error');return;}
  if(!confirm('Restore this SQLite backup? Current local data will be replaced.'))return;
  const form=new FormData();form.append('backup',file);
@@ -2855,6 +2856,7 @@ async function showDenylist(id){
  }catch(e){setText('denylist',e.message,'error');}
 }
 async function bulkDeny(action){
+ if(!confirm((action==='add'?'Add':'Remove')+' this domain across all active profiles?'))return;
  const domain=document.getElementById('deny-domain').value.trim();if(!domain){setText('bulk-result','Enter a domain.','error');return;}
  try{const d=await api('/api/denylist/bulk',{method:'POST',body:JSON.stringify({domain,action})});setText('bulk-result',action.toUpperCase()+': '+d.successes+' succeeded, '+d.failures+' failed, '+d.skipped+' skipped.','ok');refresh();}catch(e){setText('bulk-result',e.message,'error');}
 }
@@ -2986,6 +2988,16 @@ def request_json() -> dict[str, Any]:
 
 def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flask:
     app = Flask(__name__)
+
+    @app.before_request
+    def safe_mode_guard():
+        if request.path.startswith("/api/") and request.method in {"POST","PATCH","DELETE"}:
+            protected=("/api/denylist","/api/config-changes/","/api/profiles/")
+            if features.setting("safe_mode","0")=="1" and request.path.startswith(protected):
+                if request.path=="/api/profiles/discover":
+                    return None
+                return jsonify({"error":"Safe Mode is enabled. NextDNS configuration changes are blocked until Safe Mode is disabled."}),423
+        return None
 
     @app.get("/")
     def index() -> str:

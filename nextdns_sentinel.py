@@ -586,10 +586,41 @@ class FeatureStore:
 
     def analytics(self) -> dict[str, Any]:
         with self._connect() as db:
-            severity=[dict(r) for r in db.execute("SELECT severity,COUNT(*) count FROM alert_metadata GROUP BY severity").fetchall()]
-            risk=[dict(r) for r in db.execute("SELECT domain_risk,COUNT(*) count FROM alert_metadata GROUP BY domain_risk").fetchall()]
+            severity=[dict(r) for r in db.execute("""
+                SELECT COALESCE(NULLIF(m.severity,''),CASE
+                    WHEN COALESCE(m.risk_score,0)>=80 THEN 'critical'
+                    WHEN COALESCE(m.risk_score,0)>=60 THEN 'high'
+                    WHEN COALESCE(m.risk_score,0)>=35 THEN 'medium'
+                    ELSE 'low' END) severity,COUNT(*) count
+                FROM alerts a LEFT JOIN alert_metadata m ON m.alert_id=a.id
+                GROUP BY 1 ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END
+            """).fetchall()]
+            risk=[dict(r) for r in db.execute("""
+                SELECT COALESCE(NULLIF(m.domain_risk,''),di.risk,'unknown') domain_risk,COUNT(*) count
+                FROM alerts a
+                LEFT JOIN alert_metadata m ON m.alert_id=a.id
+                LEFT JOIN domain_intelligence di ON di.domain=a.domain
+                WHERE a.domain<>''
+                GROUP BY 1 ORDER BY count DESC
+            """).fetchall()]
             open_incidents=db.execute("SELECT COUNT(*) FROM incidents WHERE status IN ('open','investigating')").fetchone()[0]
-            return {"severity":severity,"domain_risk":risk,"open_incidents":open_incidents}
+            incidents=[dict(r) for r in db.execute("""
+                SELECT id,profile_id,title,severity,risk_score,status,summary,alert_count,domain,device_id,updated_at
+                FROM incidents ORDER BY updated_at DESC LIMIT 12
+            """).fetchall()]
+            recent_risk=[dict(r) for r in db.execute("""
+                SELECT a.id,a.profile_id,a.account_name,a.domain,a.alert_type,a.reason,a.status,
+                       COALESCE(NULLIF(m.severity,''),CASE WHEN a.alert_type='denylist_match' THEN 'high' ELSE 'medium' END) severity,
+                       COALESCE(m.risk_score,CASE WHEN a.alert_type='denylist_match' THEN 65 ELSE 20 END) risk_score,
+                       COALESCE(NULLIF(m.domain_risk,''),di.risk,'low') domain_risk,
+                       COALESCE(m.risk_factors,'[]') risk_factors,a.event_timestamp,a.created_at
+                FROM alerts a
+                LEFT JOIN alert_metadata m ON m.alert_id=a.id
+                LEFT JOIN domain_intelligence di ON di.domain=a.domain
+                ORDER BY a.id DESC LIMIT 20
+            """).fetchall()]
+            return {"severity":severity,"domain_risk":risk,"open_incidents":open_incidents,
+                    "incidents":incidents,"recent_risk":recent_risk}
 
     def health(self) -> dict[str, Any]:
         with self._connect() as db:
@@ -3075,12 +3106,20 @@ function formatTime(value){
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
 
 function renderIntelligence(data){
- const sev={};for(const x of data?.intelligence?.severity||[])sev[x.severity]=x.count;
- setText('open-incidents',data?.intelligence?.open_incidents||0,'');
- setText('critical-alerts',sev.critical||0,'');
- setText('high-alerts',sev.high||0,'');
- const risks=(data?.intelligence?.domain_risk||[]).map(x=>x.domain_risk+': '+x.count).join(' · ');
- setText('domain-risk',risks||'None','');
+ const intel=data?.intelligence||{},sev={};for(const x of intel.severity||[])sev[x.severity]=Number(x.count||0);
+ const open=Number(intel.open_incidents||0);setText('open-incidents',open,'');setText('critical-alerts',sev.critical||0,'');setText('high-alerts',sev.high||0,'');
+ const risks=(intel.domain_risk||[]).map(x=>x.domain_risk+': '+x.count).join(' · ');setText('domain-risk',risks||'None','');
+ const riskBox=document.getElementById('risk-overview');if(riskBox)riskBox.querySelectorAll('.risk-action-list').forEach(x=>x.remove());
+ const list=document.createElement('div');list.className='risk-action-list mini-list';
+ const title=document.createElement('div');title.className='muted';title.textContent='Recent risk activity';list.append(title);
+ for(const x of intel.recent_risk||[]){const row=document.createElement('button');row.type='button';row.className='mini-item';row.style.cssText='width:100%;text-align:left;background:none;border:0;cursor:pointer';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=(x.severity||'medium').toUpperCase()+' · '+(x.domain||x.alert_type||'Alert')+' · '+(x.account_name||x.profile_id);row.lastChild.textContent=String(x.risk_score||0)+'/100 · '+formatDateTime(x.event_timestamp||x.created_at);row.onclick=()=>{navigateToTarget('security','alerts');setTimeout(()=>{const f=document.getElementById('alert-filter');if(f){f.value=x.alert_type||'';f.dispatchEvent(new Event('change'));}},50)};list.append(row);}
+ if(riskBox)riskBox.append(list);
+ const incidentsBox=document.getElementById('incidents');if(incidentsBox&&intel.incidents){renderIncidentSummary(intel.incidents);}
+}
+function renderIncidentSummary(items){
+ const box=document.getElementById('incidents');if(!box)return;box.replaceChildren();setText('incident-count',items.length+' incidents','');
+ if(!items.length){box.textContent='No correlated incidents yet. New correlated alerts will appear here.';return;}
+ for(const x of items){const row=document.createElement('div');row.className='mini-item';row.style.cursor='pointer';row.onclick=()=>loadIncidentDetail(x.id);row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent='#'+x.id+' · '+x.title+' · '+String(x.status||'open').toUpperCase();row.lastChild.textContent=String(x.risk_score||0)+'/100 · '+(x.alert_count||0)+' alert(s) · '+formatDateTime(x.updated_at);box.append(row);}
 }
 function editDevice(device){
  const form=document.getElementById('device-edit-form');if(!form)return;

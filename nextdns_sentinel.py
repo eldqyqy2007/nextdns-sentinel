@@ -252,8 +252,7 @@ class Store:
             row = db.execute(
                 """
                 SELECT 1 FROM alerts
-                WHERE profile_id=? AND domain=? AND created_at>=?
-                  AND notified_at<>''
+                WHERE profile_id=? AND domain=? AND notified_at>=?
                 ORDER BY id DESC LIMIT 1
                 """,
                 (profile_id, domain, cutoff),

@@ -3686,7 +3686,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/profiles/<profile_id>/config/<section>")
     def api_profile_config_get(profile_id:str,section:str)->Any:
-        allowed={"profile","security","privacy","parentalControl","settings"}
+        allowed={"profile","security","privacy","parentalControl","settings","denylist","allowlist"}
         if section not in allowed: return jsonify({"error":"Unsupported configuration section."}),400
         account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
         if not account: return jsonify({"error":"Account not found."}),404
@@ -3704,9 +3704,22 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         data=request_json()
         account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
         if not account: return jsonify({"error":"Account not found."}),404
+        if not isinstance(data,dict):
+            return jsonify({"error":"Configuration payload must be a JSON object."}),422
+        preview=bool(data.pop("_preview",False))
+        if not data and not preview:
+            return jsonify({"error":"Configuration payload is empty."}),422
         try:
             client=NextDNSClient(account["api_key"])
             before=config_snapshot(client.profile(profile_id))
+            current_section=before if section=="profile" else before.get(section,{})
+            if not isinstance(current_section,dict):
+                current_section={}
+            proposed=dict(current_section)
+            proposed.update(data)
+            if preview:
+                changed=sorted(k for k in set(current_section)|set(proposed) if current_section.get(k)!=proposed.get(k))
+                return jsonify({"preview":True,"section":section,"changed_fields":changed,"before":current_section,"proposed":proposed})
             path=f"/profiles/{profile_id}" if section=="profile" else f"/profiles/{profile_id}/{section}"
             result=client._patch(path,data)
             live=client.profile(profile_id); after=config_snapshot(live)
@@ -3841,7 +3854,6 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 raise NextDNSError(f"NextDNS returned an unexpected profile response for {profile_id}.")
             resolved_name = profile_name or str(profile.get("name") or profile_id)
             resolved_display = name or resolved_name
-            client.denylist(profile_id)
             store.upsert_account({
                 "profile_id": profile_id,
                 "name": resolved_display,
@@ -3850,8 +3862,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 "active": True,
                 "added_at": utc_now(),
             })
-            if not sentinel.is_running():
-                sentinel.start()
+            if not ((sentinel.profile_threads or {}).get(profile_id) and (sentinel.profile_threads or {}).get(profile_id).is_alive()):
+                sentinel.start_profile(profile_id)
             return jsonify({"saved": True, "running": sentinel.is_running()})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400

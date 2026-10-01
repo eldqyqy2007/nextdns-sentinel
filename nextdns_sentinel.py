@@ -3790,10 +3790,18 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.post("/api/rules")
     def api_rule_save() -> Any:
-        data=request_json(); name=str(data.get("name","")).strip()
+        data=request_json(); name=str(data.get("name","")).strip(); rule=data.get("rule") or {}
         if not name: return jsonify({"error":"Rule name is required."}),400
-        rid=features.save_rule(data.get("id"),name,data.get("rule") or {},bool(data.get("enabled",True)))
-        features.audit("rule_save","rule",str(rid),details={"name":name})
+        if not isinstance(rule, dict): return jsonify({"error":"Rule definition must be a JSON object."}),400
+        allowed_actions={"","suppress","ignore","escalate"}
+        action=str(rule.get("action","")).lower()
+        if action not in allowed_actions: return jsonify({"error":"Unsupported rule action."}),400
+        try:
+            rule_id=int(data["id"]) if data.get("id") is not None else None
+        except (TypeError,ValueError):
+            return jsonify({"error":"Rule id must be an integer."}),400
+        rid=features.save_rule(rule_id,name,rule,bool(data.get("enabled",True)))
+        features.audit("rule_save","rule",str(rid),details={"name":name,"action":action})
         return jsonify({"saved":True,"id":rid})
 
     @app.delete("/api/rules/<int:rule_id>")

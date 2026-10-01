@@ -576,7 +576,7 @@ class NextDNSClient:
 
         return domains
 
-    def logs(self, profile_id: str, from_ms: int) -> tuple[list[dict[str, Any]], int]::
+    def logs(self, profile_id: str, from_ms: int) -> tuple[list[dict[str, Any]], int]:
         values: list[dict[str, Any]] = []
         cursor: str | None = None
         from_value = datetime.fromtimestamp(from_ms / 1000, timezone.utc).isoformat()

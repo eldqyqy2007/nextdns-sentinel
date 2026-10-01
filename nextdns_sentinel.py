@@ -2174,7 +2174,14 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             client._patch(f"/profiles/{change['profile_id']}",rollback)
             store.mark_change_undone(change_id)
             store.save_config_snapshot(change["profile_id"],before)
-            return jsonify({"undone":True})
+            features.audit("configuration_undo","profile",change["profile_id"],change["profile_id"],{"change_id":change_id,"fields":sorted(rollback)})
+            key=hashlib.sha256(f"config_undo:{change['profile_id']}:{change_id}:{utc_now()}".encode()).hexdigest()
+            store.add_alert(change["profile_id"],account["name"],"","",f"Configuration change #{change_id} was undone","configuration_undo","",utc_now(),key,"configuration_action",source="sentinel_dashboard")
+            alert_id=sentinel.enrich_alert(key,account,"",f"Configuration change #{change_id} was undone","configuration_undo","","",utc_now(),"","","","",False)
+            delivered=sentinel.notify(account,"",f"Configuration change #{change_id} was undone","configuration_undo","",event_time=utc_now(),alert_id=alert_id)
+            if delivered: store.mark_alert_notified(key)
+            else: store.mark_notification_failed(key)
+            return jsonify({"undone":True,"alert_id":alert_id})
         except Exception as exc: return jsonify({"error":str(exc)}),400
 
     @app.get("/api/devices")
@@ -2524,6 +2531,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             })
             if was_running:
                 sentinel.start()
+            features.audit("local_profile_update","profile",profile_id,profile_id,{"display_name":display_name,"profile_name":profile_name,"api_key_rotated":bool(new_api_key)})
             return jsonify({
                 "saved": True,
                 "profile_id": profile_id,
@@ -2583,6 +2591,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             # Restarting is the safest way to drop the account's monitor thread.
             sentinel.stop()
         store.set_account_active(profile_id, active)
+        features.audit("profile_monitor_toggle","profile",profile_id,profile_id,{"active":active})
         if active:
             try:
                 sentinel.start()
@@ -2595,6 +2604,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not store.account_exists(profile_id):
             return jsonify({"error": "Account not found."}), 404
         sentinel.stop()
+        features.audit("profile_delete","profile",profile_id,profile_id,{"profile_id":profile_id})
         store.delete_account(profile_id)
         remaining = [a for a in store.accounts() if a["active"]]
         if remaining:
@@ -2614,6 +2624,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             store.set_secret("telegram_chat_id", chat_id)
             sentinel.telegram_token = token
             sentinel.telegram_chat_id = chat_id
+            features.audit("telegram_configured","settings","telegram",details={"chat_id":chat_id})
             return jsonify({"configured": True})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
@@ -2634,6 +2645,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         store.delete_secret("telegram_chat_id")
         sentinel.telegram_token = ""
         sentinel.telegram_chat_id = ""
+        features.audit("telegram_disabled","settings","telegram")
         return jsonify({"configured": False})
 
     @app.post("/api/settings/telegram/test")

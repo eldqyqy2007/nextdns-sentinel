@@ -93,6 +93,7 @@ class Store:
                     reason TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT '',
                     client_ip TEXT NOT NULL DEFAULT '',
+                    event_timestamp TEXT NOT NULL DEFAULT '',
                     event_key TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL,
                     notified_at TEXT NOT NULL DEFAULT ''
@@ -123,6 +124,8 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN status TEXT NOT NULL DEFAULT ''")
         if "notified_at" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN notified_at TEXT NOT NULL DEFAULT ''")
+        if "event_timestamp" not in columns:
+            db.execute("ALTER TABLE alerts ADD COLUMN event_timestamp TEXT NOT NULL DEFAULT ''")
 
     def upsert_account(self, account: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as db:
@@ -185,6 +188,7 @@ class Store:
         reason: str,
         status: str,
         client_ip: str,
+        event_timestamp: str,
         event_key: str,
     ) -> bool:
         try:
@@ -193,9 +197,9 @@ class Store:
                     """
                     INSERT INTO alerts(
                         profile_id,account_name,domain,matched_domain,reason,status,
-                        client_ip,event_key,created_at
+                        client_ip,event_timestamp,event_key,created_at
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         profile_id,
@@ -205,6 +209,7 @@ class Store:
                         reason,
                         status,
                         client_ip,
+                        event_timestamp,
                         event_key,
                         utc_now(),
                     ),
@@ -309,7 +314,7 @@ class Store:
                 dict(r)
                 for r in db.execute(
                     """
-                    SELECT account_name,domain,matched_domain,reason,status,client_ip,created_at,notified_at
+                    SELECT account_name,domain,matched_domain,reason,status,client_ip,event_timestamp,created_at,notified_at
                     FROM alerts ORDER BY id DESC LIMIT ?
                     """,
                     (limit,),
@@ -502,6 +507,11 @@ def matched_domain(log: dict[str, Any]) -> str:
     )
 
 
+def event_timestamp(log: dict[str, Any]) -> str:
+    value = log.get("timestamp") or log.get("time") or ""
+    return str(value).strip()
+
+
 def event_status(log: dict[str, Any]) -> str:
     return str(log.get("status") or "").strip()
 
@@ -601,6 +611,7 @@ class Sentinel:
         status: str,
         matched: str,
         client_ip: str = "",
+        event_time: str = "",
     ) -> bool:
         message = (
             "NextDNS Sentinel alert
@@ -663,6 +674,7 @@ Client IP: {client_ip}"
                     status = event_status(log)
                     reason = event_reason(log) or "Custom denylist match"
                     client_ip = event_client_ip(log)
+                    event_time = event_timestamp(log)
 
                     recently_notified = self.store.was_recently_notified(
                         profile_id, domain, ALERT_COOLDOWN
@@ -675,6 +687,7 @@ Client IP: {client_ip}"
                         reason,
                         status,
                         client_ip,
+                        event_time,
                         key,
                     ):
                         logging.warning(
@@ -690,6 +703,7 @@ Client IP: {client_ip}"
                                 status,
                                 matched,
                                 client_ip,
+                                event_time,
                             )
                             if delivered:
                                 self.store.mark_alert_notified(key)

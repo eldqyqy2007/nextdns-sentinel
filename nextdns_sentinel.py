@@ -24,6 +24,8 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, render_template_string, request
 
+from sentinel_features import FeatureStore
+
 APP_NAME = "NextDNS Sentinel"
 DB_PATH = Path(os.getenv("NEXTDNS_SENTINEL_DB", "data/sentinel.db"))
 CONFIG_PATH = Path(os.getenv("NEXTDNS_SENTINEL_CONFIG", "config.json"))
@@ -1248,6 +1250,7 @@ def send_telegram(
 @dataclass
 class Sentinel:
     store: Store
+    features: FeatureStore | None = None
     telegram_token: str = ""
     telegram_chat_id: str = ""
     stop_event: threading.Event | None = None
@@ -1262,23 +1265,47 @@ class Sentinel:
         matched: str,
         client_ip: str = "",
         event_time: str = "",
+        device_id: str = "",
+        device_name: str = "",
+        device_model: str = "",
+        protocol: str = "",
+        encrypted: bool = False,
+        alert_id: int | None = None,
     ) -> bool:
-        title="Configuration change" if status=="config_changed" else "NextDNS Sentinel alert"
-        message = (
-            f"{title}\n\n"
-            f"Account: {account['name']}\n"
-            f"Domain: {domain or 'n/a'}\n"
-            f"Matched: {matched or 'n/a'}\n"
-            f"Status: {status or 'n/a'}\n"
-            f"Reason: {reason or 'Security event'}\n"
-            f"Event Time: {event_time or 'n/a'}\n"
-            f"Detected At: {utc_now()}"
-        )
+        context = self.features.alert_context(alert_id) if self.features and alert_id else {}
+        severity = str(context.get("severity") or "medium").upper()
+        risk_score = context.get("risk_score", "—")
+        incident_id = context.get("incident_id", "—")
+        domain_risk = str(context.get("domain_risk") or "low").upper()
+        title = "NextDNS Sentinel Security Alert"
+        lines = [
+            f"🚨 {title}",
+            "",
+            f"Severity: {severity} · Risk: {risk_score}/100",
+            f"Type: {status or 'security_event'}",
+            f"Profile: {account['name']}",
+            f"Domain: {domain or 'n/a'}",
+            f"Matched: {matched or 'n/a'}",
+            f"Domain Risk: {domain_risk}",
+            f"Reason: {reason or 'Security event'}",
+            f"Event Time: {event_time or 'n/a'}",
+            f"Detected At: {utc_now()}",
+        ]
+        if incident_id not in ("", "—", None):
+            lines.append(f"Incident: #{incident_id}")
+        if device_name or device_id:
+            lines.append(f"Device: {device_name or device_id}")
+        if device_model:
+            lines.append(f"Model: {device_model}")
         if client_ip:
-            message += f"\nClient IP: {client_ip}"
+            lines.append(f"Client IP: {client_ip}")
+        if protocol:
+            lines.append(f"Protocol: {protocol}")
+        if encrypted:
+            lines.append("Encrypted: yes")
         if not self.telegram_token or not self.telegram_chat_id:
             return False
-        return send_telegram(self.telegram_token, self.telegram_chat_id, message)
+        return send_telegram(self.telegram_token, self.telegram_chat_id, "\n".join(lines))
 
     def monitor_account(self, account: dict[str, Any]) -> None:
         client = NextDNSClient(account["api_key"])
@@ -1969,7 +1996,7 @@ def request_json() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def create_app(store: Store, sentinel: Sentinel) -> Flask:
+def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flask:
     app = Flask(__name__)
 
     @app.get("/")
@@ -2446,7 +2473,8 @@ def main() -> None:
     telegram_chat_id = os.getenv(
         config.get("telegram_chat_id_env", "TELEGRAM_CHAT_ID"), ""
     ) or store.get_secret("telegram_chat_id")
-    sentinel = Sentinel(store, telegram_token, telegram_chat_id)
+    features = FeatureStore(DB_PATH)
+    sentinel = Sentinel(store, features, telegram_token, telegram_chat_id)
 
     if args.dashboard or not args.monitor:
         if args.host not in {"127.0.0.1", "localhost", "::1"}:
@@ -2460,7 +2488,7 @@ def main() -> None:
             except RuntimeError as exc:
                 logging.error("Automatic monitor start failed: %s", exc)
         logging.info("Dashboard available at http://%s:%s", args.host, args.port)
-        create_app(store, sentinel).run(host=args.host, port=args.port, debug=False)
+        create_app(store, sentinel, features).run(host=args.host, port=args.port, debug=False)
     elif args.monitor:
         sentinel.run()
 

@@ -1946,7 +1946,7 @@ def event_key(profile_id: str, log: dict[str, Any]) -> str:
     return hashlib.sha256(f"{profile_id}:{raw}".encode()).hexdigest()
 
 
-def validate_telegram_credentials(token: str, chat_id: str) -> None:
+def validate_telegram_credentials(token: str, chat_id: str) -> dict[str, Any]:
     if not token or not chat_id:
         raise RuntimeError("Telegram bot token and chat ID are required.")
     try:
@@ -1966,6 +1966,7 @@ def validate_telegram_credentials(token: str, chat_id: str) -> None:
         raise RuntimeError("Telegram returned invalid JSON.") from exc
     if not data.get("ok"):
         raise RuntimeError("Telegram token validation failed.")
+    bot = data.get("result") if isinstance(data.get("result"), dict) else {}
     try:
         response = requests.get(
             f"https://api.telegram.org/bot{token}/getChat",
@@ -3707,13 +3708,16 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not token or not chat_id:
             return jsonify({"error": "Telegram bot token and chat ID are required."}), 400
         try:
-            validate_telegram_credentials(token, chat_id)
+            identity = validate_telegram_credentials(token, chat_id)
             store.set_secret("telegram_token", token)
             store.set_secret("telegram_chat_id", chat_id)
+            store.set_setting("telegram_bot_username", str(identity["bot"].get("username") or ""))
+            store.set_setting("telegram_bot_name", str(identity["bot"].get("first_name") or ""))
+            store.set_setting("telegram_chat_title", str(identity["chat"].get("title") or identity["chat"].get("first_name") or identity["chat"].get("username") or ""))
             sentinel.telegram_token = token
             sentinel.telegram_chat_id = chat_id
             features.audit("telegram_configured","settings","telegram",details={"chat_id":chat_id})
-            return jsonify({"configured": True})
+            return jsonify({"configured": True, "status": "enabled", "bot_username": str(identity["bot"].get("username") or ""), "bot_name": str(identity["bot"].get("first_name") or ""), "chat_title": str(identity["chat"].get("title") or identity["chat"].get("first_name") or identity["chat"].get("username") or "")})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -3723,14 +3727,22 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         chat_id = store.get_secret("telegram_chat_id")
         return jsonify({
             "configured": bool(token and chat_id),
+            "enabled": bool(token and chat_id),
+            "status": "enabled" if token and chat_id else "disabled",
             "chat_id": chat_id,
             "token_configured": bool(token),
+            "bot_username": store.setting("telegram_bot_username", ""),
+            "bot_name": store.setting("telegram_bot_name", ""),
+            "chat_title": store.setting("telegram_chat_title", ""),
         })
 
     @app.delete("/api/settings/telegram")
     def api_telegram_delete() -> Any:
         store.delete_secret("telegram_token")
         store.delete_secret("telegram_chat_id")
+        store.set_setting("telegram_bot_username", "")
+        store.set_setting("telegram_bot_name", "")
+        store.set_setting("telegram_chat_title", "")
         sentinel.telegram_token = ""
         sentinel.telegram_chat_id = ""
         features.audit("telegram_disabled","settings","telegram")

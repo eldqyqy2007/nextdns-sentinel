@@ -1690,6 +1690,39 @@ DASHBOARD = """<!doctype html>
 </div>
 </div>
 
+<div class="analytics">
+<div class="panel">
+<div class="section-head"><div><h2>Risk & Incident Overview</h2><div class="muted">Severity, domain intelligence and correlated incidents</div></div></div>
+<div id="risk-overview" class="meta"><div><strong>Open Incidents</strong><span id="open-incidents">0</span></div><div><strong>Critical</strong><span id="critical-alerts">0</span></div><div><strong>High</strong><span id="high-alerts">0</span></div><div><strong>Domain Risk</strong><span id="domain-risk">—</span></div></div>
+</div>
+<div class="panel">
+<div class="section-head"><div><h2>Sentinel Health</h2><div class="muted">Storage and runtime self-check</div></div><span id="sentinel-health-pill" class="pill">Checking</span></div>
+<div id="sentinel-health" class="mini-list"><div class="muted">Loading...</div></div>
+</div>
+</div>
+
+<div class="panel">
+<div class="section-head"><div><h2>Security Incidents</h2><div class="muted">Correlated alerts with investigation lifecycle</div></div><span id="incident-count" class="pill">0</span></div>
+<div id="incidents" class="mini-list"><div class="muted">Loading...</div></div>
+</div>
+
+<div class="panel">
+<div class="section-head"><div><h2>Domain Intelligence</h2><div class="muted">Local heuristic enrichment only; not a reputation verdict</div></div></div>
+<div id="domain-intelligence" class="mini-list"><div class="muted">Loading...</div></div>
+</div>
+
+<div class="panel">
+<div class="section-head"><div><h2>Search Everything</h2><div class="muted">Search alerts, incidents and audit activity</div></div></div>
+<div class="row"><input id="global-search" placeholder="Search domain, reason, profile, action…"><button class="neutral" onclick="runGlobalSearch()">Search</button></div>
+<div id="search-results" class="mini-list"><div class="muted">Enter a query to search.</div></div>
+</div>
+
+<div class="panel">
+<div class="section-head"><div><h2>Audit & Delivery Center</h2><div class="muted">Dashboard actions and Telegram delivery history</div></div></div>
+<div class="row"><button class="neutral" onclick="loadAudit()">Audit Log</button><button class="neutral" onclick="loadDelivery()">Telegram Delivery</button><button class="neutral" onclick="loadBulkHistory()">Bulk Operations</button><button class="neutral" onclick="exportJson()">Export JSON</button><button class="neutral" onclick="exportCsv()">Export CSV</button></div>
+<div id="operations-center" class="mini-list"><div class="muted">Choose a history view.</div></div>
+</div>
+
 <div class="panel">
 <h2>Denylist Control</h2><div class="muted">Add or remove a domain through the NextDNS API. Bulk operations report each profile separately.</div>
 <div class="row"><input id="deny-domain" placeholder="example.com"><button class="start" onclick="bulkDeny('add')">Add to all profiles</button><button class="stop" onclick="bulkDeny('remove')">Remove from all profiles</button></div>
@@ -1713,7 +1746,7 @@ DASHBOARD = """<!doctype html>
 <div class="section-head"><div><h2>Recent Alerts</h2><div class="muted">Search and inspect the latest security events</div></div><span id="alerts-count" class="pill">0 shown</span></div>
 <input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off">
 <div class="table-wrap"><table>
-<thead><tr><th>Event Time</th><th>Account</th><th>Device</th><th>Domain</th><th>Status</th><th>Reason</th><th>Notification</th><th>Seen</th></tr></thead>
+<thead><tr><th>Event Time</th><th>Account</th><th>Device</th><th>Domain</th><th>Severity</th><th>Risk</th><th>Status</th><th>Reason</th><th>Notification</th><th>Seen</th></tr></thead>
 <tbody id="alerts"></tbody>
 </table></div>
 </div>
@@ -1726,6 +1759,60 @@ function formatDateTime(value){
  return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'medium'}).format(d);
 }
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
+
+function renderIntelligence(data){
+ const sev={};for(const x of data?.intelligence?.severity||[])sev[x.severity]=x.count;
+ setText('open-incidents',data?.intelligence?.open_incidents||0,'');
+ setText('critical-alerts',sev.critical||0,'');
+ setText('high-alerts',sev.high||0,'');
+ const risks=(data?.intelligence?.domain_risk||[]).map(x=>x.domain_risk+': '+x.count).join(' · ');
+ setText('domain-risk',risks||'None','');
+}
+async function loadIncidents(){
+ const items=await api('/api/incidents?limit=20');const box=document.getElementById('incidents');box.replaceChildren();
+ setText('incident-count',items.length+' incidents','');
+ if(!items.length){box.textContent='No correlated incidents yet.';return;}
+ for(const x of items){
+  const row=document.createElement('div');row.className='mini-item';
+  const left=document.createElement('div');left.innerHTML='<strong></strong><div class="muted"></div>';
+  left.firstChild.textContent='#'+x.id+' · '+x.title+' · '+x.severity.toUpperCase();
+  left.lastChild.textContent=x.summary+' · '+x.alert_count+' alert(s) · '+formatDateTime(x.updated_at);
+  const select=document.createElement('select');for(const s of ['open','investigating','resolved','ignored']){const o=document.createElement('option');o.value=s;o.textContent=s;o.selected=s===x.status;select.append(o);}
+  select.onchange=async()=>{await api('/api/incidents/'+x.id+'/status',{method:'POST',body:JSON.stringify({status:select.value})});loadIncidents();};
+  row.append(left,select);box.append(row);
+ }
+}
+async function loadDomains(){
+ const items=await api('/api/domains?limit=12');const box=document.getElementById('domain-intelligence');box.replaceChildren();
+ if(!items.length){box.textContent='No domain intelligence available.';return;}
+ for(const x of items){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=x.domain+' · '+x.risk.toUpperCase();row.lastChild.textContent=x.score+'/100 · '+x.sightings;box.append(row);}
+}
+async function loadSentinelHealth(){
+ const d=await api('/api/sentinel/health');const box=document.getElementById('sentinel-health');box.replaceChildren();
+ const keys=Object.entries(d.checks||{});for(const [k,v] of keys){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=k;row.lastChild.textContent=v?'OK':'FAIL';row.lastChild.className=v?'ok':'error';box.append(row);}
+ setText('sentinel-health-pill',d.healthy?'Healthy':'Attention',d.healthy?'ok':'error');
+}
+async function runGlobalSearch(){
+ const q=document.getElementById('global-search').value.trim();if(!q)return;
+ const items=await api('/api/search?q='+encodeURIComponent(q));const box=document.getElementById('search-results');box.replaceChildren();
+ if(!items.length){box.textContent='No results.';return;}
+ for(const x of items){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=x.type.toUpperCase()+' #'+x.id+' · '+(x.domain||x.profile_id);row.lastChild.textContent=formatDateTime(x.timestamp);row.title=x.reason||'';box.append(row);}
+}
+async function loadAudit(){
+ const items=await api('/api/audit?limit=30');renderOperationList(items.map(x=>({main:x.action+' · '+x.target_type+' '+x.target_id,sub:x.actor+' · '+formatDateTime(x.created_at)})));
+}
+async function loadDelivery(){
+ const items=await api('/api/delivery?limit=30');renderOperationList(items.map(x=>({main:x.channel.toUpperCase()+' · '+x.status+' · alert '+(x.alert_id||'—'),sub:x.account_name+' · '+formatDateTime(x.created_at)+(x.error?' · '+x.error:'')})));
+}
+async function loadBulkHistory(){
+ const items=await api('/api/bulk-history?limit=30');renderOperationList(items.map(x=>({main:x.operation.toUpperCase()+' · '+x.domain,sub:'#'+x.id+' · '+x.successes+' success · '+x.failures+' failed · '+x.skipped+' skipped'})));
+}
+function renderOperationList(items){
+ const box=document.getElementById('operations-center');box.replaceChildren();if(!items.length){box.textContent='No history.';return;}
+ for(const x of items){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=x.main;row.lastChild.textContent=x.sub;box.append(row);}
+}
+function exportJson(){window.open('/api/export/json','_blank');}
+function exportCsv(){window.open('/api/export/csv','_blank');}
 
 function renderAnalytics(data){
  const chart=document.getElementById('alert-chart');chart.replaceChildren();
@@ -2009,7 +2096,7 @@ async function refresh(){
     ['Monitored Profiles',s.accounts],['Active Profiles',s.active_accounts],['Alerts Total',s.alerts],['Denylist Entries',s.denylist_entries],['Poll Interval',s.poll_interval_seconds+'s']
   ];
   for(const [label,value] of cards){const card=document.createElement('div');card.className='card';const l=document.createElement('div');l.className='muted';l.textContent=label;const val=document.createElement('div');val.className='value';val.textContent=value;card.append(l,val);stats.append(card);}
-  const analytics=await api('/api/analytics');renderAnalytics(analytics);
+  const analytics=await api('/api/analytics');renderAnalytics(analytics);renderIntelligence(analytics);loadIncidents();loadDomains();loadSentinelHealth();
   const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
   const heroDot=document.getElementById('hero-dot');heroDot.className='dot '+(s.last_error?'':'ok');setText('hero-status',s.last_error?'Attention required':'Monitoring healthy',s.last_error?'error':'ok');
   const healthData=await api('/api/health');renderProfileHealth(healthData);
@@ -2028,7 +2115,7 @@ async function refresh(){
   renderTimeline(healthData,alerts);
   for(const x of alerts){
    const tr=document.createElement('tr');if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
-   const vals=[x.event_timestamp,x.account_name,x.device_name||x.device_id||'Unidentified',x.domain,x.status,x.reason,x.notification_status];
+   const vals=[x.event_timestamp,x.account_name,x.device_name||x.device_id||'Unidentified',x.domain,x.severity||'—',(x.risk_score??'—')+'/100',x.status,x.reason,x.notification_status];
    vals.forEach((v,i)=>{const td=document.createElement('td');if(i===0)formatTimestampCell(td,v);else td.textContent=v??'';tr.append(td);});
    const td=document.createElement('td');const b=document.createElement('button');b.className='neutral';b.textContent=x.seen_at?'Seen':'NEW';b.onclick=async()=>{await api('/api/alerts/'+x.id+'/seen',{method:'POST'});refresh()};td.append(b);tr.append(td);body.append(tr);
   }
@@ -2062,7 +2149,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/alerts")
     def api_alerts() -> Any:
-        return jsonify(store.recent_alerts())
+        return jsonify(features.alerts(200))
 
     @app.get("/api/config-changes")
     def api_config_changes() -> Any:

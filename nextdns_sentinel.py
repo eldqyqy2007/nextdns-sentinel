@@ -626,10 +626,9 @@ def find_matching_domain(domain: str, denylist: set[str]) -> str:
         parent = ".".join(labels[i:])
         if parent in denylist:
             return parent
-
-    for entry in denylist:
-        if entry.startswith("*.") and domain.endswith(entry[1:]):
-            return entry
+        wildcard = f"*.{parent}"
+        if wildcard in denylist:
+            return wildcard
     return ""
 
 

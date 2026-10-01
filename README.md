@@ -230,11 +230,6 @@ nextdns-sentinel/
 ├── assets/
 │   ├── banner...
 │   └── icons/
-├── tests/
-│   └── test_sentinel.py
-├── .github/
-│   └── workflows/
-│       └── tests.yml
 ├── config.example.json
 ├── nextdns_sentinel.py
 ├── requirements.txt
@@ -258,7 +253,6 @@ nextdns-sentinel/
 - [x] Resilient API polling and duplicate protection
 - [x] Event context and local monitor health
 - [x] Dashboard-safe rendering
-- [x] Automated tests and CI
 - [ ] Pagination/cursor support for very high-volume logs
 - [ ] Optional authenticated dashboard
 - [ ] Alert aggregation and richer dashboard analytics

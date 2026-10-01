@@ -4087,13 +4087,21 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.get("/api/control-center")
     def api_control_center() -> Any:
         try:
+            rules_method = getattr(features, "rules", None)
+            rules = rules_method() if callable(rules_method) else []
+            maintenance_method = getattr(features, "maintenance_active", None)
+            maintenance = maintenance_method() if callable(maintenance_method) else None
+            diagnostics_method = getattr(features, "diagnostics", None)
+            diagnostics = diagnostics_method() if callable(diagnostics_method) else {"database": False, "encryption": bool(SECRET_KEY), "schema": False}
+            rate_limits_method = getattr(features, "rate_limit_history", None)
+            rate_limits = rate_limits_method(20) if callable(rate_limits_method) else []
             return jsonify({
-                "rules": features.rules(),
-                "maintenance": features.maintenance_active(),
+                "rules": rules,
+                "maintenance": maintenance,
                 "safe_mode": store.setting("safe_mode","0")=="1",
                 "api_auth": bool(store.setting("api_auth_hash","")),
-                "diagnostics": features.diagnostics(),
-                "rate_limits": features.rate_limit_history(20),
+                "diagnostics": diagnostics,
+                "rate_limits": rate_limits,
             })
         except Exception as exc:
             logging.exception("Control Center load failed")

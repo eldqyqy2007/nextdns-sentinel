@@ -3065,7 +3065,7 @@ function renderOperationList(items){
 function exportJson(){window.open('/api/export/json','_blank');}
 function exportCsv(){window.open('/api/export/csv','_blank');}
 function downloadBackup(){window.open('/api/backup','_blank');}
-document.getElementById('restore-form').addEventListener('submit',async e=>{
+bindDashboardListener('restore-form','submit',async e=>{
  if(!confirm('Restore the selected SQLite backup? Sentinel will create a rollback copy first.')){e.preventDefault();return;}
  e.preventDefault();const file=document.getElementById('restore-file').files[0];if(!file){setText('restore-status','Select a backup file first.','error');return;}
  if(!confirm('Restore this SQLite backup? Current local data will be replaced.'))return;
@@ -3250,8 +3250,8 @@ async function saveSelectedProfile(apiKey,profiles){
   setText('account-message','Selected profile is now monitored.','ok');refresh();
  }catch(err){setText('account-message',err.message,'error');}
 }
-document.getElementById('account-form').addEventListener('submit',e=>{e.preventDefault();discoverProfiles();});
-document.getElementById('telegram-form').addEventListener('submit',async e=>{
+bindDashboardListener('account-form','submit',e=>{e.preventDefault();discoverProfiles();});
+bindDashboardListener('telegram-form','submit',async e=>{
  e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());
  try{await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});setText('telegram-status','Telegram configured and encrypted locally.','ok');e.target.reset();refresh();}
  catch(err){setText('telegram-status',err.message,'error');}
@@ -3275,7 +3275,7 @@ function closeTelegramEditor(){
  document.getElementById('telegram-edit-form').reset();
  setText('telegram-edit-message','','');
 }
-document.getElementById('telegram-edit-form').addEventListener('submit',async e=>{
+bindDashboardListener('telegram-edit-form','submit',async e=>{
  e.preventDefault();
  const d=Object.fromEntries(new FormData(e.target).entries());d.id=e.target.dataset.botId;
  if(!d.id){setText('telegram-edit-message','Select a Telegram bot to edit.','error');return;}
@@ -3327,7 +3327,7 @@ function closeProfileEditor(){
   document.getElementById('profile-edit-form').reset();
   setText('profile-edit-message','','');
 }
-document.getElementById('profile-edit-form').addEventListener('submit',async e=>{
+bindDashboardListener('profile-edit-form','submit',async e=>{
   e.preventDefault();
   if(!editingProfileId)return;
   const profileId=editingProfileId;
@@ -3501,9 +3501,9 @@ async function exportAlertLogs(){
   setText('alert-log-status',d.count+' alert(s) saved to '+d.path+'.','ok');
  }catch(e){setText('alert-log-status',e.message,'error');}
 }
-document.getElementById('save-alert-logs').addEventListener('change',e=>setAlertLogSaving(e.target.checked));
+bindDashboardListener('save-alert-logs','change',e=>setAlertLogSaving(e.target.checked));
 
-let lastAlertId=Number(localStorage.getItem('sentinel_last_alert_id')||0);
+let lastAlertId=(()=>{try{return Number(localStorage.getItem('sentinel_last_alert_id')||0)}catch(e){return 0}})();
 let notificationPermissionRequested=false;
 function notifyNewDenylistAlerts(alerts){
  const fresh=alerts.filter(x=>Number(x.id||0)>lastAlertId && String(x.alert_type||'')==='denylist_match');
@@ -3524,7 +3524,7 @@ function notifyNewDenylistAlerts(alerts){
    notificationPermissionRequested=true;
    Notification.requestPermission().catch(()=>{});
  }
- if(newest>lastAlertId) localStorage.setItem('sentinel_last_alert_id',String(newest));
+ if(newest>lastAlertId){try{localStorage.setItem('sentinel_last_alert_id',String(newest))}catch(e){}}
  lastAlertId=Math.max(lastAlertId,newest);
 }
 

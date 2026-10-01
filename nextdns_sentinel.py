@@ -1404,8 +1404,10 @@ class Store:
         days=max(1,int(days)); cutoff=(datetime.now(timezone.utc)-timedelta(days=days)).isoformat()
         with self._connect() as db:
             deleted=0
-            for table in ("delivery_events","incident_alerts","alert_metadata","alerts","audit_log","bulk_operations"):
-                deleted += db.execute(f"DELETE FROM {table} WHERE created_at<?" if table!="incident_alerts" else "DELETE FROM incident_alerts WHERE alert_id NOT IN (SELECT id FROM alerts)", (cutoff,) if table!="incident_alerts" else ()).rowcount
+            for table in ("delivery_events","alerts","audit_log"):
+                deleted += db.execute(f"DELETE FROM {table} WHERE created_at<?", (cutoff,)).rowcount
+            deleted += db.execute("DELETE FROM alert_metadata WHERE alert_id NOT IN (SELECT id FROM alerts)").rowcount
+            deleted += db.execute("DELETE FROM incident_alerts WHERE alert_id NOT IN (SELECT id FROM alerts)").rowcount
             db.execute("VACUUM")
             db.execute("INSERT INTO retention_runs(retention_days,deleted_alerts,vacuumed,created_at) VALUES(?,?,?,?)",(days,deleted,1,now_iso()))
         return deleted

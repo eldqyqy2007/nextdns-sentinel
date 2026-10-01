@@ -49,7 +49,7 @@ class FeatureStore:
         self._ensure_schema()
 
     def _connect(self):
-        db = sqlite3.connect(self.path)
+        db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         return db
 
@@ -2060,6 +2060,8 @@ class Sentinel:
     telegram_chat_id: str = ""
     stop_event: threading.Event | None = None
     threads: list[threading.Thread] | None = None
+    profile_events: dict[str, threading.Event] | None = None
+    profile_threads: dict[str, threading.Thread] | None = None
 
     def notify(
         self,
@@ -2179,14 +2181,15 @@ class Sentinel:
             except (TypeError,ValueError):
                 continue
 
-    def monitor_account(self, account: dict[str, Any]) -> None:
+    def monitor_account(self, account: dict[str, Any], stop_event: threading.Event | None = None) -> None:
         client = NextDNSClient(account["api_key"])
         profile_id = account["profile_id"]
         logging.info("Monitoring %s (%s)", account["name"], profile_id)
         denylist: set[str] = set()
         iteration = 0
+        event = stop_event or self.stop_event
 
-        while self.stop_event is None or not self.stop_event.is_set():
+        while event is None or not event.is_set():
             try:
                 if self.features:
                     self.features.heartbeat("running", {"profile_id": profile_id})
@@ -2339,8 +2342,8 @@ class Sentinel:
                         if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
 
                 self.store.set_poll_state(profile_id, checkpoint_ms)
-                if self.stop_event:
-                    self.stop_event.wait(CHECK_INTERVAL)
+                if event:
+                    event.wait(CHECK_INTERVAL)
                 else:
                     time.sleep(CHECK_INTERVAL)
 
@@ -2352,8 +2355,8 @@ class Sentinel:
                 self.store.set_poll_state(
                     profile_id, self.store.get_poll_ms(profile_id), message
                 )
-                if self.stop_event:
-                    self.stop_event.wait(max(CHECK_INTERVAL, 10))
+                if event:
+                    event.wait(max(CHECK_INTERVAL, 10))
                 else:
                     time.sleep(max(CHECK_INTERVAL, 10))
             except Exception as exc:
@@ -2369,38 +2372,78 @@ class Sentinel:
                 else:
                     time.sleep(max(CHECK_INTERVAL, 10))
 
-    def start(self) -> int:
-        if self.is_running():
-            return 0
+    def _sync_thread_list(self) -> None:
+        self.threads = list((self.profile_threads or {}).values())
 
+    def start_profile(self, profile_id: str) -> bool:
+        account = next((a for a in self.store.accounts() if a["profile_id"] == profile_id and a["active"]), None)
+        if not account:
+            return False
+        if self.profile_events is None:
+            self.profile_events = {}
+        if self.profile_threads is None:
+            self.profile_threads = {}
+        existing = self.profile_threads.get(profile_id)
+        if existing and existing.is_alive():
+            return False
+        if self.stop_event is None:
+            self.stop_event = threading.Event()
+        if self.stop_event.is_set():
+            self.stop_event.clear()
+        event = threading.Event()
+        self.profile_events[profile_id] = event
+        thread = threading.Thread(
+            target=self.monitor_account,
+            args=(account, event),
+            name=f"sentinel-{profile_id}",
+            daemon=True,
+        )
+        self.profile_threads[profile_id] = thread
+        self._sync_thread_list()
+        thread.start()
+        logging.info("%s started monitoring profile %s.", APP_NAME, profile_id)
+        return True
+
+    def stop_profile(self, profile_id: str) -> bool:
+        event = (self.profile_events or {}).get(profile_id)
+        thread = (self.profile_threads or {}).get(profile_id)
+        if not event and not thread:
+            return False
+        if event:
+            event.set()
+        if thread:
+            thread.join(timeout=CHECK_INTERVAL + 5)
+        if self.profile_events:
+            self.profile_events.pop(profile_id, None)
+        if self.profile_threads:
+            self.profile_threads.pop(profile_id, None)
+        self._sync_thread_list()
+        logging.info("%s stopped monitoring profile %s.", APP_NAME, profile_id)
+        return True
+
+    def start(self) -> int:
         accounts = [a for a in self.store.accounts() if a["active"]]
         if not accounts:
             raise RuntimeError(
                 "No active accounts configured. Add a NextDNS profile from the dashboard."
             )
-
-        self.stop_event = threading.Event()
+        if self.stop_event is None:
+            self.stop_event = threading.Event()
+        if self.stop_event.is_set():
+            self.stop_event.clear()
+        if self.profile_events is None:
+            self.profile_events = {}
+        if self.profile_threads is None:
+            self.profile_threads = {}
         if self.features:
             self.features.heartbeat("starting", {"profiles": len(accounts)})
-        self.threads = [
-            threading.Thread(
-                target=self.monitor_account,
-                args=(account,),
-                name=f"sentinel-{account['profile_id']}",
-                daemon=True,
-            )
-            for account in accounts
-        ]
-
-        for thread in self.threads:
-            thread.start()
-
-        logging.info(
-            "%s is monitoring %d account(s).",
-            APP_NAME,
-            len(self.threads),
-        )
-        return len(self.threads)
+        started = 0
+        for account in accounts:
+            if self.start_profile(account["profile_id"]):
+                started += 1
+        self._sync_thread_list()
+        logging.info("%s is monitoring %d active account(s).", APP_NAME, len(self.threads or []))
+        return started
 
     def is_running(self) -> bool:
         return bool(self.threads and any(thread.is_alive() for thread in self.threads))
@@ -2408,9 +2451,13 @@ class Sentinel:
     def stop(self) -> None:
         if self.stop_event:
             self.stop_event.set()
-        for thread in self.threads or []:
+        for event in (self.profile_events or {}).values():
+            event.set()
+        for thread in (self.profile_threads or {}).values():
             thread.join(timeout=CHECK_INTERVAL + 5)
-        self.threads = None
+        self.profile_threads = {}
+        self.profile_events = {}
+        self.threads = []
         self.stop_event = None
         if self.features:
             self.features.heartbeat("stopped")
@@ -3742,8 +3789,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             if profile_name != current_profile_name:
                 client.update_profile_name(profile_id, profile_name)
             # Editing local/API profile identity must not depend on denylist availability.
-            if was_running:
-                sentinel.stop()
+            if profile_running:
+                sentinel.stop_profile(profile_id)
             store.upsert_account({
                 "profile_id": profile_id,
                 "name": display_name,
@@ -3752,8 +3799,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 "active": bool(account["active"]),
                 "added_at": account["added_at"],
             })
-            if was_running:
-                sentinel.start()
+            if profile_running:
+                sentinel.start_profile(profile_id)
             features.audit("local_profile_update","profile",profile_id,profile_id,{"display_name":display_name,"profile_name":profile_name,"api_key_rotated":bool(new_api_key)})
             sentinel.notify_report("Profile settings updated",[
                 f"Profile: {profile_id}",
@@ -3768,9 +3815,9 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 "running": sentinel.is_running(),
             })
         except Exception as exc:
-            if was_running and not sentinel.is_running():
+            if profile_running and not ((sentinel.profile_threads or {}).get(profile_id) and (sentinel.profile_threads or {}).get(profile_id).is_alive()):
                 try:
-                    sentinel.start()
+                    sentinel.start_profile(profile_id)
                 except Exception:
                     pass
             return jsonify({"error": str(exc)}), 400
@@ -3816,8 +3863,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         data = request_json()
         active = bool(data.get("active"))
         if not active:
-            # Restarting is the safest way to drop the account's monitor thread.
-            sentinel.stop()
+            sentinel.stop_profile(profile_id)
         store.set_account_active(profile_id, active)
         features.audit("profile_monitor_toggle","profile",profile_id,profile_id,{"active":active})
         sentinel.notify_report("Profile monitoring changed",[
@@ -3826,7 +3872,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         ])
         if active:
             try:
-                sentinel.start()
+                sentinel.start_profile(profile_id)
             except RuntimeError as exc:
                 return jsonify({"error": str(exc)}), 400
         return jsonify({"active": active, "running": sentinel.is_running()})
@@ -3835,7 +3881,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     def api_account_delete(profile_id: str) -> Any:
         if not store.account_exists(profile_id):
             return jsonify({"error": "Account not found."}), 404
-        sentinel.stop()
+        sentinel.stop_profile(profile_id)
         features.audit("profile_delete","profile",profile_id,profile_id,{"profile_id":profile_id})
         sentinel.notify_report("Profile removed from Sentinel",[
             f"Profile: {profile_id}",
@@ -3844,7 +3890,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         store.delete_account(profile_id)
         remaining = [a for a in store.accounts() if a["active"]]
         if remaining:
-            sentinel.start()
+            for account in remaining:
+                sentinel.start_profile(account["profile_id"])
         return jsonify({"deleted": True, "running": sentinel.is_running()})
 
     @app.post("/api/settings/telegram")

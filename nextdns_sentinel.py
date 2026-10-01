@@ -3639,29 +3639,31 @@ function dashboardPagePanelIds(){
 }
 function topLevelDashboardPanel(el){
  if(!el)return null;
- let panel=el.closest('.panel');
- if(!panel)return null;
  const main=document.querySelector('.app-content main');
- if(!main)return panel;
- while(panel.parentElement && panel.parentElement!==main){
-  panel=panel.parentElement.closest('.panel');
-  if(!panel)break;
+ if(!main)return el.closest('.panel');
+ let container=el.closest('.panel, .analytics, .grid');
+ if(!container)return null;
+ while(container.parentElement && container.parentElement!==main){
+  container=container.parentElement.closest('.panel, .analytics, .grid');
+  if(!container)break;
  }
- return panel;
+ return container;
 }
 function setupDashboardPages(){
  const map=dashboardPagePanelIds();
- const pageByPanel=new Map();
+ const pageByContainer=new Map();
  for(const [page,ids] of Object.entries(map)){
   for(const id of ids){
-   const panel=topLevelDashboardPanel(document.getElementById(id));
-   if(panel&&!pageByPanel.has(panel))pageByPanel.set(panel,page);
+   const container=topLevelDashboardPanel(document.getElementById(id));
+   if(container&&!pageByContainer.has(container))pageByContainer.set(container,page);
   }
  }
  const main=document.querySelector('.app-content main');
  if(main){
-  main.querySelectorAll(':scope > .panel').forEach(panel=>{
-   panel.dataset.page=pageByPanel.get(panel)||'';
+  main.querySelectorAll(':scope > *').forEach(container=>{
+   const page=pageByContainer.get(container);
+   if(page)container.dataset.page=page;
+   else if(container.id!=='stats')delete container.dataset.page;
   });
  }
  const stats=document.getElementById('stats');
@@ -3694,10 +3696,9 @@ function showPage(page){
  setupDashboardPages();
  const main=document.querySelector('.app-content main');
  if(main){
-  main.querySelectorAll(':scope > .panel[data-page]').forEach(panel=>{
-   panel.style.display=panel.dataset.page===allowed?'block':'none';
+  main.querySelectorAll(':scope > [data-page]').forEach(container=>{
+   container.style.display=container.dataset.page===allowed?'':'none';
   });
-  main.querySelectorAll(':scope > .panel[data-page=""]').forEach(panel=>{panel.style.display='none';});
  }
  const stats=document.getElementById('stats');
  if(stats)stats.style.display=allowed==='overview'?'grid':'none';

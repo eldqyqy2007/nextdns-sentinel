@@ -2900,7 +2900,7 @@ DASHBOARD = """<!doctype html>
 
 <div class="analytics">
 <div class="panel">
-<div class="section-head"><div><h2>Alert Activity</h2><div class="muted">Last 24 hours · hourly event volume</div></div><span id="analytics-total" class="pill">0 alerts</span></div>
+<div class="section-head"><div><h2>Alert Activity</h2><div class="muted">Last 24 hours · hourly alert volume</div></div><span id="analytics-total" class="pill">0 alerts</span></div>
 <div id="alert-chart" class="chart"></div>
 </div>
 <div class="panel">
@@ -2995,10 +2995,10 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="panel">
-<div class="section-head"><div><h2>Recent Alerts</h2><div class="muted">Search and inspect the latest security events</div></div><span id="alerts-count" class="pill">0 shown</span></div>
-<div class="row"><input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off"><select id="alert-type-filter" style="max-width:260px"><option value="">All event types</option><option value="config_change">Profile config change</option><option value="configuration_action">Configuration action</option><option value="denylist_match">Blocked-site access</option><option value="denylist_added">Denylist added</option><option value="denylist_removed">Denylist removed</option><option value="device_inactive">Device event</option><option value="configuration_undo">Configuration undo</option></select></div>
+<div class="section-head"><div><h2>Security Alerts & Actions</h2><div class="muted">Blocked-site access, profile changes, denylist actions, device activity and system alerts</div></div><span id="alerts-count" class="pill">0 shown</span></div>
+<div class="row"><input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off"><select id="alert-type-filter" style="max-width:260px"><option value="">All alert types</option><option value="security_alert">Security alerts</option><option value="profile_change">Profile changes</option><option value="denylist_action">Denylist actions</option><option value="device_activity">Device activity</option><option value="system_action">System actions</option><option value="config_change">Profile config change</option><option value="configuration_action">Configuration action</option><option value="denylist_match">Blocked-site access</option><option value="denylist_added">Denylist added</option><option value="denylist_removed">Denylist removed</option><option value="device_inactive">Device event</option><option value="configuration_undo">Configuration undo</option></select></div>
 <div class="table-wrap"><table>
-<thead><tr><th>Event Time</th><th>Account</th><th>Device</th><th>Domain</th><th>Severity</th><th>Risk</th><th>Status</th><th>Reason</th><th>Notification</th><th>Seen</th></tr></thead>
+<thead><tr><th>Time</th><th>Type</th><th>Account</th><th>Device</th><th>Domain</th><th>Severity</th><th>Risk</th><th>Status</th><th>Reason</th><th>Notification</th><th>Seen</th></tr></thead>
 <tbody id="alerts"></tbody>
 </table></div>
 </div>
@@ -3219,13 +3219,21 @@ function renderTimeline(events){
   box.append(card);
  }
 }
+function alertPresentation(alert){
+ const type=String(alert?.alert_type||'').toLowerCase();
+ if(type==='denylist_match')return {category:'security_alert',label:'🚫 Blocked Site',description:'Blocked-site access'};
+ if(type==='config_changed'||type==='config_change'||type==='configuration_action'||type==='configuration_undo')return {category:'profile_change',label:type==='configuration_undo'?'↩️ Config Undo':'🔧 Profile Change',description:'Profile configuration change'};
+ if(type==='denylist_added'||type==='denylist_removed')return {category:'denylist_action',label:type==='denylist_added'?'➕ Denylist Added':'➖ Denylist Removed',description:'Denylist action'};
+ if(type.startsWith('device_'))return {category:'device_activity',label:type==='device_new'?'📱 New Device':'📱 Device Activity',description:'Device activity'};
+ return {category:'system_action',label:'⚙️ System Action',description:'System or operational action'};
+}
 function filterAlerts(){
  const q=(document.getElementById('alert-search').value||'').toLowerCase().trim();
  const type=(document.getElementById('alert-type-filter')?.value||'').toLowerCase();
  let shown=0;
  document.querySelectorAll('#alerts tr').forEach(row=>{
   const matchText=!q||row.textContent.toLowerCase().includes(q);
-  const matchType=!type||String(row.dataset.alertType||'').toLowerCase()===type;
+  const matchType=!type||String(row.dataset.alertType||'').toLowerCase()===type||String(row.dataset.alertCategory||'').toLowerCase()===type;
   const match=matchText&&matchType;row.style.display=match?'':'none';if(match)shown++;
  });
  setText('alerts-count',shown+' shown','');
@@ -3648,9 +3656,11 @@ async function refresh(){
   const alerts=await api('/api/alerts');notifyNewDenylistAlerts(alerts);const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
   for(const x of alerts){
-   const tr=document.createElement('tr');tr.dataset.alertType=x.alert_type||'';if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
+   const tr=document.createElement('tr');const presentation=alertPresentation(x);tr.dataset.alertType=x.alert_type||'';tr.dataset.alertCategory=presentation.category;if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
    const vals=[x.event_timestamp,x.account_name,x.device_name||x.device_id||'Unidentified',x.domain,x.severity||'—',(x.risk_score??'—')+'/100',x.status,x.reason,x.notification_status];
-   vals.forEach((v,i)=>{const td=document.createElement('td');if(i===0)formatTimestampCell(td,v);else td.textContent=v??'';tr.append(td);});
+   const timeTd=document.createElement('td');formatTimestampCell(timeTd,x.event_timestamp);tr.append(timeTd);
+   const typeTd=document.createElement('td');const typeStrong=document.createElement('strong');typeStrong.textContent=presentation.label;typeTd.append(typeStrong);typeTd.title=presentation.description;tr.append(typeTd);
+   vals.slice(1).forEach(v=>{const td=document.createElement('td');td.textContent=v??'';tr.append(td);});
    const td=document.createElement('td');const b=document.createElement('button');b.className='neutral';b.textContent=x.seen_at?'Seen':'NEW';b.onclick=async()=>{await api('/api/alerts/'+x.id+'/seen',{method:'POST'});refresh()};td.append(b);tr.append(td);body.append(tr);
   }
   filterAlerts();

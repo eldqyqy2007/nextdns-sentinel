@@ -3133,7 +3133,18 @@ async function loadConfigChanges(){
   for(const x of items.slice(0,20)){
    const row=document.createElement('div');row.className='account';
    const title=document.createElement('div');title.textContent=x.profile_id+' · '+x.change_type+' · '+formatDateTime(x.changed_at);
-   const b=document.createElement('button');b.className='neutral';b.textContent=x.undone_at?'Undone':'Undo';b.disabled=!!x.undone_at;b.onclick=async()=>{try{await api('/api/config-changes/'+x.id+'/undo',{method:'POST'});refresh()}catch(e){alert(e.message)}};row.append(title,b);box.append(row);
+    const b=document.createElement('button');b.className='neutral';b.textContent=x.undone_at?'Undone':'Undo';b.disabled=!!x.undone_at;b.onclick=async()=>{
+      b.disabled=true;
+      try{
+        await api('/api/config-changes/'+x.id+'/undo',{method:'POST'});
+        await refresh();
+        await loadConfigChanges();
+        setText('account-message','Configuration change #'+x.id+' was undone successfully.','ok');
+      }catch(e){
+        b.disabled=false;
+        setText('account-message','Undo failed: '+e.message,'error');
+      }
+    };row.append(title,b);box.append(row);
   }
  }catch(e){}
 }
@@ -3453,6 +3464,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         changes=store.config_changes(200)
         change=next((x for x in changes if x["id"]==change_id),None)
         if not change: return jsonify({"error":"Change not found."}),404
+        if change.get("undone_at"): return jsonify({"error":"This configuration change was already undone."}),409
         account=next((a for a in store.accounts() if a["profile_id"]==change["profile_id"]),None)
         if not account: return jsonify({"error":"Profile is no longer configured locally."}),404
         try:
@@ -3465,6 +3477,9 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             if not rollback:
                 return jsonify({"error":"Nothing to undo."}),409
             client._patch(f"/profiles/{change['profile_id']}",rollback)
+            verified=config_snapshot(client.profile(change["profile_id"]))
+            if verified!=before:
+                return jsonify({"error":"Undo was sent but the live profile did not match the previous configuration."}),502
             store.mark_change_undone(change_id)
             store.save_config_snapshot(change["profile_id"],before)
             features.audit("configuration_undo","profile",change["profile_id"],change["profile_id"],{"change_id":change_id,"fields":sorted(rollback)})
@@ -3474,8 +3489,10 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             delivered=sentinel.notify(account,"",f"Configuration change #{change_id} was undone","configuration_undo","",event_time=utc_now(),alert_id=alert_id)
             if delivered: store.mark_alert_notified(key)
             else: store.mark_notification_failed(key)
-            return jsonify({"undone":True,"alert_id":alert_id})
-        except Exception as exc: return jsonify({"error":str(exc)}),400
+            return jsonify({"undone":True,"change_id":change_id,"profile_id":change["profile_id"],"fields":sorted(rollback),"alert_id":alert_id})
+        except Exception as exc:
+            logging.exception("Configuration undo failed for change %s",change_id)
+            return jsonify({"error":str(exc)}),400
 
     @app.get("/api/devices")
     def api_devices() -> Any:

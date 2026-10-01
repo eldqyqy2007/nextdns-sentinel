@@ -3128,7 +3128,16 @@ function filterAlerts(){
  });
  setText('alerts-count',shown+' shown','');
 }
-function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
+const transientStatusIds=new Set(['account-message','profile-edit-message','bulk-result','config-status','telegram-status','telegram-edit-message','alert-log-status','control-details']);
+function setText(id,text,cls=''){
+ const e=document.getElementById(id);if(!e)return;
+ e.textContent=text;e.className=cls;
+ if(transientStatusIds.has(id)){
+  window.__statusTimers=window.__statusTimers||{};
+  clearTimeout(window.__statusTimers[id]);
+  if(text)window.__statusTimers[id]=setTimeout(()=>{e.textContent='';e.className='';},5000);
+ }
+}
 function showActionToast(message,type='error'){
  const e=document.getElementById('action-toast');if(!e)return;
  e.textContent=message;e.className='toast show '+type;clearTimeout(window.__toastTimer);

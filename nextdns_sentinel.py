@@ -917,7 +917,7 @@ class Store:
                             int(self.get_setting("telegram_enabled","1")=="1"),self.get_setting("telegram_bot_username",""),
                             self.get_setting("telegram_bot_name",""),self.get_setting("telegram_chat_title",""),"",
                             self.get_setting("telegram_last_error",""),now,now))
-                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='denylist'").fetchone():
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='denylist'").fetchone():
             db.execute("DELETE FROM denylist WHERE rowid NOT IN (SELECT MAX(rowid) FROM denylist GROUP BY profile_id,domain)")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_denylist_profile_domain_unique ON denylist(profile_id,domain)")
 

@@ -846,8 +846,7 @@ class Store:
 
 
 
-    @staticmethod
-    def _migrate_alert_columns(db: sqlite3.Connection) -> None:
+    def _migrate_alert_columns(self, db: sqlite3.Connection) -> None:
         columns = {row[1] for row in db.execute("PRAGMA table_info(alerts)")}
         if "matched_domain" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN matched_domain TEXT NOT NULL DEFAULT ''")

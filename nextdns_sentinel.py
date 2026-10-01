@@ -1469,6 +1469,7 @@ class Store:
                 deleted += db.execute(f"DELETE FROM {table} WHERE created_at<?", (cutoff,)).rowcount
             deleted += db.execute("DELETE FROM alert_metadata WHERE alert_id NOT IN (SELECT id FROM alerts)").rowcount
             deleted += db.execute("DELETE FROM incident_alerts WHERE alert_id NOT IN (SELECT id FROM alerts)").rowcount
+            db.commit()
             db.execute("VACUUM")
             db.execute("INSERT INTO retention_runs(retention_days,deleted_alerts,vacuumed,created_at) VALUES(?,?,?,?)",(days,deleted,1,now_iso()))
         return deleted

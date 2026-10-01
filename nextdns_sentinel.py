@@ -2543,7 +2543,7 @@ DASHBOARD = """<!doctype html>
 <div><strong>Parental Control</strong><span>Categories, services, SafeSearch and bypass controls.</span></div>
 <div><strong>Settings</strong><span>Logging, retention, performance, block page and other settings.</span></div>
 </div>
-<div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile overview</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option></select></div>
+<div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile overview</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option><option value="denylist">Denylist</option><option value="allowlist">Allowlist</option></select></div>
 <div id="config-readable" class="mini-list"><div class="muted">Load a section to see a human-readable summary.</div></div>
 <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Advanced JSON editor</summary>
 <p class="muted">Example: change a boolean such as <code>true</code>/<code>false</code>, a list item, or a supported setting value. Keep the JSON structure intact. Sentinel validates the request through the NextDNS API and shows the returned error if NextDNS rejects it.</p>
@@ -3099,8 +3099,17 @@ async function loadConfigSection(){
 async function saveConfigSection(){
  const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;let data;
  try{data=JSON.parse(document.getElementById('config-json').value)}catch(e){setText('config-status','Invalid JSON.','error');return;}
- if(!confirm('Apply this configuration through the NextDNS API?'))return;
- try{await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});setText('config-status','Change applied successfully.','ok');await refresh();await loadConfigChanges();await loadConfigSection();}catch(e){setText('config-status','Change failed: '+e.message,'error');}
+ if(!data||Array.isArray(data)||typeof data!=='object'){setText('config-status','Configuration must be a JSON object.','error');return;}
+ try{
+  const preview=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(Object.assign({},data,{_preview:true}))});
+  const changed=preview.changed_fields||[];
+  if(!changed.length){setText('config-status','No changes detected. Nothing will be sent to NextDNS.','muted');return;}
+  const summary='Fields changed: '+changed.join(', ')+'\\n\\nApply these changes to the selected NextDNS profile?';
+  if(!confirm(summary))return;
+  await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});
+  setText('config-status','Change applied successfully and verified against the live profile.','ok');
+  await refresh();await loadConfigChanges();await loadConfigSection();
+ }catch(e){setText('config-status','Change failed: '+e.message,'error');}
 }
 async function loadAlertLogSettings(){
  try{

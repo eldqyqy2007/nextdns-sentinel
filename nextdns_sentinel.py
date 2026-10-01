@@ -2862,10 +2862,7 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="grid" id="stats"></div>
-<div class="panel" id="summary-details" style="display:none">
-<div class="section-head"><div><h2 id="summary-details-title">Summary Details</h2><div class="muted">Full details and recent records for the selected summary.</div></div><button class="neutral" type="button" onclick="closeSummaryDetails()">Close</button></div>
-<div id="summary-details-body" class="mini-list"></div>
-</div>
+<div class="panel" id="summary-details" style="display:none"><div class="section-head"><div><h2 id="summary-details-title">Summary Details</h2><div class="muted">Full details and recent records for the selected summary.</div></div><button class="neutral" type="button" onclick="closeSummaryDetails()">Close</button></div><div id="summary-details-body" class="mini-list"></div></div>
 
 <div class="analytics">
 <div class="panel">
@@ -2994,7 +2991,7 @@ function summaryDetailButton(label,page,target){
 async function openSummaryDetails(label,stats){
  const panel=document.getElementById('summary-details'),title=document.getElementById('summary-details-title'),body=document.getElementById('summary-details-body');
  if(!panel||!title||!body)return;
- panel.dataset.open='1';panel.style.display='block';title.textContent=label+' · Details';body.replaceChildren();
+ panel.style.display='block';title.textContent=label+' · Details';body.replaceChildren();
  const loading=document.createElement('div');loading.className='muted';loading.textContent='Loading details…';body.append(loading);
  panel.scrollIntoView({behavior:'smooth',block:'start'});
  try{
@@ -3004,7 +3001,9 @@ async function openSummaryDetails(label,stats){
    body.append(summaryDetailRow('Total',rows.length));
    for(const a of rows){
     const row=document.createElement('div');row.className='mini-item';
-    const info=document.createElement('span');info.innerHTML='<strong></strong><br><span class="muted"></span>';info.querySelector('strong').textContent=a.name||a.profile_name||a.profile_id;info.querySelector('.muted').textContent=a.profile_id+' · '+(a.active?'Active':'Inactive')+' · Added '+formatDateTime(a.added_at);
+    const info=document.createElement('span');info.innerHTML='<strong></strong><br><span class="muted"></span>';
+    info.querySelector('strong').textContent=a.name||a.profile_name||a.profile_id;
+    info.querySelector('.muted').textContent=a.profile_id+' · '+(a.active?'Active':'Inactive')+' · Added '+formatDateTime(a.added_at);
     row.append(info,summaryDetailButton('Open profiles','profiles','accounts'));body.append(row);
    }
    if(!rows.length)body.append(summaryDetailRow('Result','No profiles found.'));
@@ -3012,15 +3011,18 @@ async function openSummaryDetails(label,stats){
    const alerts=await api('/api/alerts');body.append(summaryDetailRow('Total records loaded',alerts.length));
    for(const a of alerts.slice(0,100)){
     const row=document.createElement('div');row.className='mini-item';
-    const info=document.createElement('span');info.innerHTML='<strong></strong><br><span class="muted"></span>';info.querySelector('strong').textContent=(a.domain||a.alert_type||'Security event')+' · '+(a.severity||'—').toUpperCase();info.querySelector('.muted').textContent=(a.profile_id||'')+' · '+(a.reason||a.status||'')+' · '+formatDateTime(a.event_timestamp||a.created_at);
+    const info=document.createElement('span');info.innerHTML='<strong></strong><br><span class="muted"></span>';
+    info.querySelector('strong').textContent=(a.domain||a.alert_type||'Security event')+' · '+(a.severity||'—').toUpperCase();
+    info.querySelector('.muted').textContent=(a.profile_id||'')+' · '+(a.reason||a.status||'')+' · '+formatDateTime(a.event_timestamp||a.created_at);
     row.append(info);body.append(row);
    }
    body.append(summaryDetailButton('Open full Alerts log','security','alerts'));
   }else if(label==='Denylist Entries'){
    const accounts=await api('/api/accounts');let total=0;
    for(const a of accounts){
-    let entries=[];try{entries=await api('/api/denylist/'+encodeURIComponent(a.profile_id));}catch(e){entries=[];}
-    total+=entries.length;const row=document.createElement('div');row.className='account';
+    let entries=[];try{entries=await api('/api/denylist/'+encodeURIComponent(a.profile_id));}catch(e){}
+    total+=entries.length;
+    const row=document.createElement('div');row.className='account';
     const head=document.createElement('strong');head.textContent=(a.name||a.profile_name||a.profile_id)+' · '+entries.length+' entries';row.append(head);
     const list=document.createElement('div');list.className='mini-list';
     for(const entry of entries.slice(0,100)){const item=document.createElement('div');item.className='mini-item';item.textContent=entry.domain||String(entry);list.append(item);}
@@ -3028,16 +3030,16 @@ async function openSummaryDetails(label,stats){
    }
    body.prepend(summaryDetailRow('Total denylist entries',total));body.append(summaryDetailButton('Open full Denylist management','profiles','denylist'));
   }else if(label==='Poll Interval'){
-   const health=await api('/api/health');body.append(summaryDetailRow('Poll interval',String(stats.poll_interval_seconds||0)+'s'),summaryDetailRow('Monitor status',health?.running?'Running':'Stopped'),summaryDetailRow('Last successful poll',formatDateTime(stats.last_success_at)),summaryDetailRow('Last error',stats.last_error||'None'),summaryDetailButton('Open monitor health','overview','health'));
+   const health=await api('/api/health');
+   body.append(summaryDetailRow('Poll interval',String(stats.poll_interval_seconds||0)+'s'),summaryDetailRow('Monitor status',health?.running?'Running':'Stopped'),summaryDetailRow('Last successful poll',formatDateTime(stats.last_success_at)),summaryDetailRow('Last error',stats.last_error||'None'),summaryDetailButton('Open monitor health','overview','health'));
   }
- }catch(e){
-  body.replaceChildren();body.append(summaryDetailRow('Error',e.message));
- }
+ }catch(e){body.replaceChildren();body.append(summaryDetailRow('Error',e.message));}
 }
 function closeSummaryDetails(){
  const panel=document.getElementById('summary-details');if(!panel)return;
- panel.dataset.open='0';panel.style.display='none';
+ panel.style.display='none';
 }
+
 
 function renderIntelligence(data){
  const sev={};for(const x of data?.intelligence?.severity||[])sev[x.severity]=x.count;
@@ -3141,7 +3143,7 @@ function renderAnalytics(data){
   const wrap=document.createElement('div');wrap.className='bar-wrap';wrap.title=formatDateTime(point.time)+': '+point.count+' alert(s)';
   const value=document.createElement('span');value.className='bar-value';value.textContent=point.count?point.count:'';value.style.display=point.count?'block':'none';
   const bar=document.createElement('div');bar.className='bar';bar.style.height=(point.count?Math.max(4,(point.count/max)*100):2)+'%';
-  const label=document.createElement('span');label.className='bar-label';const chartTime=new Date(point.time);const pad=n=>String(n).padStart(2,'0');label.textContent=pad(chartTime.getHours())+':'+pad(chartTime.getMinutes());
+  const label=document.createElement('span');label.className='bar-label';label.textContent=(()=>{const t=new Date(point.time);const pad=n=>String(n).padStart(2,'0');return pad(t.getHours())+':'+pad(t.getMinutes())})();
   wrap.append(value,bar,label);chart.append(wrap);
  }
  setText('analytics-total',(data.total_24h||0)+' alerts','');
@@ -3616,8 +3618,7 @@ async function refresh(){
   for(const [label,value] of cards){
     const card=document.createElement('div');card.className='card';card.style.cursor='pointer';card.tabIndex=0;
     const l=document.createElement('div');l.className='muted';l.textContent=label;const val=document.createElement('div');val.className='value';val.textContent=value;card.append(l,val);
-    card.onclick=()=>openSummaryDetails(label,s);
-    card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openSummaryDetails(label,s);}};
+    card.onclick=()=>openSummaryDetails(label,s);card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openSummaryDetails(label,s);}}
     stats.append(card);
   }
   const analytics=await api('/api/analytics');renderAnalytics(analytics);renderIntelligence(analytics);loadIncidents();loadDomains();loadSentinelHealth();
@@ -3665,73 +3666,19 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');showActionToast('Refresh failed: '+e.message,'error');}
 }
-function bindDashboardEvent(id,event,handler){
- const el=document.getElementById(id);if(el)el.addEventListener(event,handler);
-}
-function dashboardBoot(){
- try{
-  setupDashboardPages();
-  showPage(localStorage.getItem('sentinel_active_page')||'overview');
-  detectDevice();
-  window.addEventListener('resize',detectDevice);
-  bindDashboardEvent('alert-search','input',filterAlerts);
-  bindDashboardEvent('alert-type-filter','change',filterAlerts);
-  loadAlertLogSettings();
-  loadConfigChanges();
-  loadControlCenter();
-  refresh();
-  setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
- }catch(error){
-  console.error('Sentinel dashboard initialization failed:',error);
-  showActionToast('Dashboard initialization failed: '+(error?.message||error),'error');
-  const health=document.getElementById('health');
-  if(health){health.className='status error';health.textContent='Dashboard initialization failed: '+(error?.message||error);}
- }
-}
-window.addEventListener('error',event=>{
- const message=event?.error?.message||event?.message;
- if(message)showActionToast('Dashboard error: '+message,'error');
-});
-window.addEventListener('unhandledrejection',event=>{
- const message=event?.reason?.message||String(event?.reason||'Unknown error');
- showActionToast('Dashboard error: '+message,'error');
-});
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dashboardBoot,{once:true});
-else dashboardBoot();
-function dashboardPagePanelIds(){
- const map={
-  overview:['hero-dot','runtime','health','profile-health','event-timeline','summary-details'],
-  analytics:['alert-chart','top-domains','risk-overview','sentinel-health'],
-  devices:['device-activity','device-editor'],
-  security:['incidents','domain-intelligence','global-search','operations-center','alerts','alert-search','alert-type-filter'],
-  profiles:['account-form','accounts','profile-editor','config-changes','config-profile','config-readable','config-form','deny-profile','denylist'],
-  notifications:['telegram-form','telegram-status','telegram-bot-card','telegram-editor'],
-  operations:['control-summary','rules-list','maintenance-seconds','suppression-fingerprint','control-details','api-auth-token'],
-  data:['restore-form','restore-file','save-alert-logs','alert-log-status']
- };
- return map;
-}
+setupDashboardPages();showPage(localStorage.getItem('sentinel_active_page')||'overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);document.getElementById('alert-type-filter').addEventListener('change',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
 function setupDashboardPages(){
- const map=dashboardPagePanelIds();
- const pageByElement=new Map();
- const topLevelPanel=(el)=>{
-  let panel=el?.closest('.panel');
-  if(!panel)return null;
-  while(panel.parentElement && !panel.parentElement.matches('.app-content main')){
-   panel=panel.parentElement.closest('.panel');
-   if(!panel)break;
-  }
-  return panel;
+ const map={
+  overview:['stats','health','profile-health','event-timeline','hero-dot','runtime','summary-details'],
+  analytics:['alert-chart','risk-overview','sentinel-health'],
+  devices:['device-activity'],
+  security:['incidents','domain-intelligence','global-search','operations-center','alerts','alert-search'],
+  profiles:['account-form','config-changes','config-section','denylist','deny-domain'],
+  notifications:['telegram-form'],
+  operations:['control-summary','rule-name','maintenance-seconds','control-details'],
+  data:['restore-file','save-alert-logs']
  };
- for(const [page,ids] of Object.entries(map)){
-  for(const id of ids){
-   const panel=topLevelPanel(document.getElementById(id));
-   if(panel)pageByElement.set(panel,page);
-  }
- }
- document.querySelectorAll('.app-content main > .panel').forEach(panel=>{
-  panel.dataset.page=pageByElement.get(panel)||'';
- });
+ document.querySelectorAll('.panel').forEach(p=>{p.dataset.page='';for(const [page,ids] of Object.entries(map)){if(ids.some(id=>p.querySelector('#'+id))){p.dataset.page=page;break}}});
  const stats=document.getElementById('stats');if(stats)stats.dataset.page='overview';
 }
 function navigateToTarget(page,targetId){
@@ -3747,26 +3694,38 @@ function scrollToPendingTarget(page){
  setTimeout(()=>document.getElementById(target)?.scrollIntoView({behavior:'smooth',block:'start'}),80);
 }
 function showPage(page){
- const allowed=Object.prototype.hasOwnProperty.call(dashboardPagePanelIds(),page)?page:'overview';
- localStorage.setItem('sentinel_active_page',allowed);
+ localStorage.setItem('sentinel_active_page',page);
  setupDashboardPages();
- document.querySelectorAll('.app-content main > .panel[data-page]').forEach(panel=>{
-  panel.style.display=panel.dataset.page===allowed?'block':'none';
- });
- const stats=document.getElementById('stats');if(stats)stats.style.display=allowed==='overview'?'grid':'none';
- const summaryDetails=document.getElementById('summary-details');
- if(summaryDetails&&allowed!=='overview'){summaryDetails.dataset.open='0';summaryDetails.style.display='none';}
- document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.page===allowed));
- if(allowed==='analytics'){loadRangeAnalytics();loadRiskBaseline();}
- if(allowed==='operations')loadControlCenter();
- if(allowed==='security'){loadIncidents();loadDomains();}
- if(allowed==='devices')refresh();
- if(allowed==='profiles')loadConfigChanges();
- if(allowed==='notifications')refresh();
- if(allowed==='data')loadAlertLogSettings();
+ document.querySelectorAll('.panel[data-page]').forEach(p=>{p.style.display=p.dataset.page===page?'block':'none'});document.querySelectorAll('.panel[data-page=""]').forEach(p=>p.style.display='none');
+ const stats=document.getElementById('stats');if(stats)stats.style.display=page==='overview'?'grid':'none';
+ document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
+ if(page==='analytics'){loadRangeAnalytics();loadRiskBaseline();}
+ if(page==='operations')loadControlCenter();
+ if(page==='security'){loadIncidents();loadDomains();}
+ if(page==='devices')refresh();
+ if(page==='profiles')loadConfigChanges();
+
+ if(page==='data')loadAlertLogSettings();
  if(window.innerWidth<=900)toggleSidebar(false);
- scrollToPendingTarget(allowed);
+ scrollToPendingTarget(page);
 }
+document.addEventListener('click',event=>{
+ const target=event.target.closest('[data-nav-page][data-nav-target]');
+ if(!target)return;
+ event.preventDefault();
+ navigateToTarget(target.dataset.navPage,target.dataset.navTarget);
+});
+function toggleSidebar(force){
+ const s=document.getElementById('sidebar');if(!s)return;
+ const open=typeof force==='boolean'?force:!s.classList.contains('open');s.classList.toggle('open',open);
+}
+document.addEventListener('click',event=>{
+ const sidebar=document.getElementById('sidebar');
+ if(!sidebar?.classList.contains('open'))return;
+ if(sidebar.contains(event.target)||event.target.closest('#sidebar-toggle'))return;
+ toggleSidebar(false);
+});
+
 async function loadRiskBaseline(){try{const [risk,base]=await Promise.all([api('/api/risk-history?days=30'),api('/api/baseline')]);const riskText=risk.slice(-10).map(x=>x.day+': avg '+Number(x.avg_risk||0).toFixed(1)+' · max '+x.max_risk+' · '+x.alerts+' alerts').join(' | ');const baseText=base.slice(0,12).map(x=>x.bucket_hour+':00 '+Number(x.baseline||0).toFixed(1)+' avg').join(' · ');setText('control-details','Risk history: '+(riskText||'No data')+' || Baseline: '+(baseText||'No data'),'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');await refresh();await loadControlCenter();}catch(e){setText('control-details',e.message,'error')}}
 async function showConfigDiff(){try{const accounts=await api('/api/accounts');if(!accounts.length){setText('control-details','No profiles configured.','muted');return}const d=await api('/api/config-diff/'+encodeURIComponent(accounts[0].profile_id));setText('control-details',d.changed?d.diff.map(x=>x.field+': '+JSON.stringify(x.before)+' → '+JSON.stringify(x.after)).join(' | '):'No recent configuration diff for '+accounts[0].profile_id,'muted')}catch(e){setText('control-details',e.message,'error')}}

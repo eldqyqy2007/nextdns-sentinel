@@ -564,7 +564,7 @@ class NextDNSClient:
 
         return domains
 
-    def logs(self, profile_id: str, from_ms: int) -> list[dict[str, Any]]:
+    def logs(self, profile_id: str, from_ms: int) -> tuple[list[dict[str, Any]], int]::
         values: list[dict[str, Any]] = []
         cursor: str | None = None
         from_value = datetime.fromtimestamp(from_ms / 1000, timezone.utc).isoformat()
@@ -606,7 +606,7 @@ class NextDNSClient:
                 len(values),
                 profile_id,
             )
-        return values
+        return values, to_ms
 
 
 def normalize_domain(domain: str) -> str:
@@ -805,7 +805,7 @@ class Sentinel:
                     else now_ms - INITIAL_LOOKBACK * 1000
                 )
 
-                logs = client.logs(profile_id, from_ms)
+                logs, checkpoint_ms = client.logs(profile_id, from_ms)
                 for log in logs:
                     domain = event_domain(log)
                     if not domain or not domain_matches(domain, denylist):
@@ -884,7 +884,7 @@ class Sentinel:
                     else:
                         self.store.mark_notification_failed(alert["event_key"])
 
-                self.store.set_poll_state(profile_id, now_ms)
+                self.store.set_poll_state(profile_id, checkpoint_ms)
                 if self.stop_event:
                     self.stop_event.wait(CHECK_INTERVAL)
                 else:

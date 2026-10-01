@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,7 @@ API_RETRIES = max(0, int(os.getenv("NEXTDNS_SENTINEL_API_RETRIES", "3")))
 NOTIFICATION_RETRY_BASE = max(5, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_BASE", "30")))
 NOTIFICATION_RETRY_MAX = max(NOTIFICATION_RETRY_BASE, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_MAX", "900")))
 MAX_NOTIFICATION_ATTEMPTS = max(1, int(os.getenv("NEXTDNS_SENTINEL_MAX_NOTIFICATION_ATTEMPTS", "10")))
+DEVICE_INACTIVITY_SECONDS = max(60, int(os.getenv("NEXTDNS_SENTINEL_DEVICE_INACTIVITY_SECONDS", "180")))
 SECRET_KEY_FILE = Path(
     os.getenv("NEXTDNS_SENTINEL_SECRET_FILE", "data/.sentinel_secret")
 )
@@ -133,6 +134,14 @@ class Store:
                     client_ip TEXT NOT NULL DEFAULT '',
                     event_timestamp TEXT NOT NULL DEFAULT '',
                     event_key TEXT NOT NULL UNIQUE,
+                    alert_type TEXT NOT NULL DEFAULT 'denylist_match',
+                    device_id TEXT NOT NULL DEFAULT '',
+                    device_name TEXT NOT NULL DEFAULT '',
+                    device_model TEXT NOT NULL DEFAULT '',
+                    protocol TEXT NOT NULL DEFAULT '',
+                    encrypted INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'nextdns_logs',
+                    seen_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     notified_at TEXT NOT NULL DEFAULT '',
                     notification_status TEXT NOT NULL DEFAULT 'pending',
@@ -185,6 +194,32 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN last_notification_attempt_at TEXT NOT NULL DEFAULT ''")
         if "next_retry_at" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN next_retry_at TEXT NOT NULL DEFAULT ''")
+        for column, definition in {
+            "alert_type": "TEXT NOT NULL DEFAULT 'denylist_match'",
+            "device_id": "TEXT NOT NULL DEFAULT ''",
+            "device_name": "TEXT NOT NULL DEFAULT ''",
+            "device_model": "TEXT NOT NULL DEFAULT ''",
+            "protocol": "TEXT NOT NULL DEFAULT ''",
+            "encrypted": "INTEGER NOT NULL DEFAULT 0",
+            "source": "TEXT NOT NULL DEFAULT 'nextdns_logs'",
+            "seen_at": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in columns:
+                db.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS device_state (
+                profile_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL DEFAULT '',
+                device_model TEXT NOT NULL DEFAULT '',
+                client_ip TEXT NOT NULL DEFAULT '',
+                last_seen_at TEXT NOT NULL DEFAULT '',
+                last_status TEXT NOT NULL DEFAULT '',
+                last_domain TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(profile_id, device_id)
+            )
+        """)
 
     def upsert_account(self, account: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as db:
@@ -294,6 +329,30 @@ class Store:
                 )
             ]
 
+    def mark_alert_seen(self, alert_id: int) -> bool:
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute("UPDATE alerts SET seen_at=? WHERE id=? AND seen_at=''",(utc_now(),alert_id))
+            return cur.rowcount>0
+
+    def update_device_state(self, profile_id: str, device_id: str, device_name: str,
+                            device_model: str, client_ip: str, last_seen_at: str,
+                            last_status: str, last_domain: str) -> None:
+        device_id=device_id or "__UNIDENTIFIED__"
+        with sqlite3.connect(self.path) as db:
+            db.execute("""
+                INSERT INTO device_state(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(profile_id,device_id) DO UPDATE SET
+                  device_name=excluded.device_name,device_model=excluded.device_model,
+                  client_ip=excluded.client_ip,last_seen_at=CASE WHEN excluded.last_seen_at<>'' THEN excluded.last_seen_at ELSE device_state.last_seen_at END,
+                  last_status=excluded.last_status,last_domain=excluded.last_domain,updated_at=excluded.updated_at
+            """,(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,utc_now()))
+
+    def device_states(self) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory=sqlite3.Row
+            return [dict(r) for r in db.execute("SELECT profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at FROM device_state ORDER BY device_name,device_id")]
+
     def accounts(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
@@ -335,6 +394,13 @@ class Store:
         client_ip: str,
         event_timestamp: str,
         event_key: str,
+        alert_type: str = "denylist_match",
+        device_id: str = "",
+        device_name: str = "",
+        device_model: str = "",
+        protocol: str = "",
+        encrypted: bool = False,
+        source: str = "nextdns_logs",
     ) -> bool:
         try:
             with sqlite3.connect(self.path) as db:
@@ -342,9 +408,10 @@ class Store:
                     """
                     INSERT INTO alerts(
                         profile_id,account_name,domain,matched_domain,reason,status,
-                        client_ip,event_timestamp,event_key,created_at
+                        client_ip,event_timestamp,event_key,alert_type,device_id,device_name,
+                        device_model,protocol,encrypted,source,created_at
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?,?)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         profile_id,
@@ -356,7 +423,8 @@ class Store:
                         client_ip,
                         event_timestamp,
                         event_key,
-                        utc_now(),
+                        alert_type, device_id, device_name, device_model, protocol,
+                        int(encrypted), source, utc_now(),
                     ),
                 )
             if self.save_alert_logs_enabled():
@@ -629,9 +697,9 @@ class Store:
                 dict(r)
                 for r in db.execute(
                     """
-                    SELECT account_name,domain,matched_domain,reason,status,client_ip,event_timestamp,
-                           created_at,notified_at,notification_status,notification_attempts,
-                           last_notification_attempt_at,next_retry_at
+                    SELECT id,profile_id,account_name,domain,matched_domain,reason,status,client_ip,event_timestamp,
+                           alert_type,device_id,device_name,device_model,protocol,encrypted,source,seen_at,
+                           created_at,notified_at,notification_status,notification_attempts,last_notification_attempt_at,next_retry_at
                     FROM alerts ORDER BY id DESC LIMIT ?
                     """,
                     (limit,),
@@ -975,6 +1043,19 @@ def event_client_ip(log: dict[str, Any]) -> str:
     ).strip()
 
 
+def event_device(log: dict[str, Any]) -> tuple[str,str,str]:
+    d=log.get("device")
+    if isinstance(d,dict):
+        return str(d.get("id") or ""),str(d.get("name") or ""),str(d.get("model") or "")
+    return "","",""
+
+def event_protocol(log: dict[str, Any]) -> str:
+    return str(log.get("protocol") or "")
+
+def event_encrypted(log: dict[str, Any]) -> bool:
+    v=log.get("encrypted")
+    return bool(v) if isinstance(v,bool) else str(v).lower()=="true"
+
 def event_key(profile_id: str, log: dict[str, Any]) -> str:
     raw = json.dumps(log, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(f"{profile_id}:{raw}".encode()).hexdigest()
@@ -1143,6 +1224,10 @@ class Sentinel:
                     reason = event_reason(log) or "Custom denylist match"
                     client_ip = event_client_ip(log)
                     event_time = event_timestamp(log)
+                    device_id,device_name,device_model=event_device(log)
+                    protocol=event_protocol(log)
+                    encrypted=event_encrypted(log)
+                    self.store.update_device_state(profile_id,device_id,device_name,device_model,client_ip,event_time,status,domain)
 
                     recently_notified = self.store.was_recently_notified(
                         profile_id, domain, ALERT_COOLDOWN
@@ -1157,6 +1242,7 @@ class Sentinel:
                         client_ip,
                         event_time,
                         key,
+                        "denylist_match",device_id,device_name,device_model,protocol,encrypted,"nextdns_logs",
                     ):
                         logging.warning(
                             "Denylist match: %s -> %s",
@@ -1300,7 +1386,7 @@ DASHBOARD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NextDNS Sentinel</title>
-<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 15% 0%,#14243a 0,#080b12 36%);color:#e8edf7;margin:0;padding:24px;line-height:1.45}main{max-width:1250px;margin:auto}h1{margin:0;font-size:32px;letter-spacing:-.6px}h2{margin:0 0 12px;font-size:18px}h3{margin:0 0 10px}.muted{color:#8c98aa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.card,.panel{background:linear-gradient(145deg,rgba(16,22,33,.97),rgba(11,16,25,.97));border:1px solid #263248;border-radius:16px;padding:17px;margin-bottom:14px;box-shadow:0 12px 35px rgba(0,0,0,.16)}.value{font-size:29px;font-weight:750;margin-top:3px}.card .muted{text-transform:capitalize;font-size:12px;letter-spacing:.4px}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #263248}.ok{color:#9af0bb}.error{color:#ffb4b4}.neutral-text{color:#b8c4d8}button{border:1px solid transparent;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer;margin:3px;transition:transform .15s,filter .15s}button:hover{filter:brightness(1.08);transform:translateY(-1px)}.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}input,select{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;margin:5px 0 10px}label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}th{color:#9eabc0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}tbody tr:hover{background:#141d2a}code{color:#9ed0ff}.hidden{display:none}.account{padding:12px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}.hero{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:22px 24px;margin-bottom:14px}.hero-copy{min-width:0}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:#7f91aa;font-weight:800}.hero-badge{border:1px solid #2d405c;background:#0c1420;border-radius:12px;padding:10px 13px;white-space:nowrap}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:#65758d}.dot.ok{background:#35c76f}.analytics{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.chart{height:230px;display:flex;align-items:flex-end;gap:6px;padding:18px 8px 28px;border-top:1px solid #202a3a}.bar-wrap{height:100%;flex:1;display:flex;align-items:flex-end;justify-content:center;position:relative;min-width:4px}.bar{width:100%;max-width:22px;min-height:3px;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,#55d98a,#2e9e68);transition:height .3s}.bar-label{position:absolute;bottom:-24px;font-size:10px;color:#75839a;white-space:nowrap}.bar-value{position:absolute;top:-18px;font-size:10px;color:#aebbd0}.mini-list{display:grid;gap:8px}.mini-item{display:flex;justify-content:space-between;gap:10px;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.progress{height:5px;background:#202a3a;border-radius:99px;overflow:hidden;margin-top:5px}.progress>span{display:block;height:100%;background:#55d98a}.section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.pill{font-size:11px;padding:4px 8px;border-radius:99px;background:#172235;color:#aebbd0}@media(max-width:800px){body{padding:12px}.analytics{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.hero-badge{width:100%}}.device-badge{font-size:11px;padding:5px 9px;border:1px solid #2d405c;border-radius:99px;background:#101a28;color:#b8c4d8}.health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.health-card{padding:12px;background:#0b1019;border:1px solid #202a3a;border-radius:10px}.health-card .name{font-weight:750}.health-card .line{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-top:5px}.timeline{display:grid;gap:8px}.timeline-item{display:grid;grid-template-columns:8px 1fr auto;gap:10px;align-items:center;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.timeline-dot{width:8px;height:8px;border-radius:50%;background:#55d98a}.timeline-dot.warn{background:#efc95f}.timeline-dot.error{background:#ef6b73}.table-wrap{overflow-x:auto;border-radius:14px}body.device-android{padding:12px}body.device-android main{max-width:100%}body.device-android h1{font-size:26px}body.device-android .card{padding:14px}body.device-android button{min-height:42px}body.device-android input,body.device-android select{min-height:44px}body.device-windows{padding:28px}@media(max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.value{font-size:23px}.card{padding:13px}.chart{gap:2px;height:200px}.bar{max-width:12px}.bar-label{font-size:8px;transform:rotate(-35deg);transform-origin:top left}.section-head{align-items:flex-start;flex-direction:column}.hero-badge{white-space:normal}.timeline-item{grid-template-columns:8px minmax(0,1fr);}.timeline-item>strong{grid-column:2}}</style>
+<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 15% 0%,#14243a 0,#080b12 36%);color:#e8edf7;margin:0;padding:24px;line-height:1.45}main{max-width:1250px;margin:auto}h1{margin:0;font-size:32px;letter-spacing:-.6px}h2{margin:0 0 12px;font-size:18px}h3{margin:0 0 10px}.muted{color:#8c98aa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.card,.panel{background:linear-gradient(145deg,rgba(16,22,33,.97),rgba(11,16,25,.97));border:1px solid #263248;border-radius:16px;padding:17px;margin-bottom:14px;box-shadow:0 12px 35px rgba(0,0,0,.16)}.value{font-size:29px;font-weight:750;margin-top:3px}.card .muted{text-transform:capitalize;font-size:12px;letter-spacing:.4px}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #263248}.ok{color:#9af0bb}.error{color:#ffb4b4}.neutral-text{color:#b8c4d8}button{border:1px solid transparent;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer;margin:3px;transition:transform .15s,filter .15s}button:hover{filter:brightness(1.08);transform:translateY(-1px)}.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}input,select{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;margin:5px 0 10px}label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}th{color:#9eabc0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}tbody tr:hover{background:#141d2a}code{color:#9ed0ff}.hidden{display:none}.account{padding:12px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}.hero{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:22px 24px;margin-bottom:14px}.hero-copy{min-width:0}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:#7f91aa;font-weight:800}.hero-badge{border:1px solid #2d405c;background:#0c1420;border-radius:12px;padding:10px 13px;white-space:nowrap}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:#65758d}.dot.ok{background:#35c76f}.analytics{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.chart{height:230px;display:flex;align-items:flex-end;gap:6px;padding:18px 8px 28px;border-top:1px solid #202a3a}.bar-wrap{height:100%;flex:1;display:flex;align-items:flex-end;justify-content:center;position:relative;min-width:4px}.bar{width:100%;max-width:22px;min-height:3px;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,#55d98a,#2e9e68);transition:height .3s}.bar-label{position:absolute;bottom:-24px;font-size:10px;color:#75839a;white-space:nowrap}.bar-value{position:absolute;top:-18px;font-size:10px;color:#aebbd0}.mini-list{display:grid;gap:8px}.mini-item{display:flex;justify-content:space-between;gap:10px;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.progress{height:5px;background:#202a3a;border-radius:99px;overflow:hidden;margin-top:5px}.progress>span{display:block;height:100%;background:#55d98a}.section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.pill{font-size:11px;padding:4px 8px;border-radius:99px;background:#172235;color:#aebbd0}@media(max-width:800px){body{padding:12px}.analytics{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.hero-badge{width:100%}}.device-badge{font-size:11px;padding:5px 9px;border:1px solid #2d405c;border-radius:99px;background:#101a28;color:#b8c4d8}.health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.health-card{padding:12px;background:#0b1019;border:1px solid #202a3a;border-radius:10px}.health-card .name{font-weight:750}.health-card .line{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-top:5px}.timeline{display:grid;gap:8px}.timeline-item{display:grid;grid-template-columns:8px 1fr auto;gap:10px;align-items:center;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.timeline-dot{width:8px;height:8px;border-radius:50%;background:#55d98a}.timeline-dot.warn{background:#efc95f}.timeline-dot.error{background:#ef6b73}.table-wrap{overflow-x:auto;border-radius:14px}.device-state{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}.device-item{padding:10px;background:#0b1019;border:1px solid #202a3a;border-radius:10px}.device-item .name{font-weight:750}.device-item .line{font-size:12px;display:flex;justify-content:space-between;margin-top:5px}body.device-android{padding:12px}body.device-android main{max-width:100%}body.device-android h1{font-size:26px}body.device-android .card{padding:14px}body.device-android button{min-height:42px}body.device-android input,body.device-android select{min-height:44px}body.device-windows{padding:28px}@media(max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.value{font-size:23px}.card{padding:13px}.chart{gap:2px;height:200px}.bar{max-width:12px}.bar-label{font-size:8px;transform:rotate(-35deg);transform-origin:top left}.section-head{align-items:flex-start;flex-direction:column}.hero-badge{white-space:normal}.timeline-item{grid-template-columns:8px minmax(0,1fr);}.timeline-item>strong{grid-column:2}}</style>
 </head>
 <body>
 <main>
@@ -1321,6 +1407,7 @@ DASHBOARD = """<!doctype html>
 <div id="profile-health" class="health-grid"><div class="muted">Loading...</div></div>
 </div>
 
+<div class="panel"><div class="section-head"><div><h2>Device Activity</h2><div class="muted">Last observed DNS activity; inactivity does not prove DNS was disabled.</div></div><span id="device-count" class="pill">0 devices</span></div><div id="device-activity" class="device-state"><div class="muted">Loading...</div></div></div>
 <div class="panel">
 <div class="section-head"><div><h2>Event Timeline</h2><div class="muted">Latest monitor and alert activity</div></div><span id="timeline-count" class="pill">0 events</span></div>
 <div id="event-timeline" class="timeline"><div class="muted">Loading...</div></div>
@@ -1404,7 +1491,7 @@ DASHBOARD = """<!doctype html>
 <div class="section-head"><div><h2>Recent Alerts</h2><div class="muted">Search and inspect the latest security events</div></div><span id="alerts-count" class="pill">0 shown</span></div>
 <input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off">
 <div class="table-wrap"><table>
-<thead><tr><th>Event Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th></tr></thead>
+<thead><tr><th>Event Time</th><th>Account</th><th>Device</th><th>Domain</th><th>Status</th><th>Reason</th><th>Notification</th><th>Seen</th></tr></thead>
 <tbody id="alerts"></tbody>
 </table></div>
 </div>
@@ -1456,6 +1543,20 @@ function detectDevice(){
  document.body.classList.add('device-'+os.toLowerCase());
  const el=document.getElementById('device-info');
  if(el)el.textContent=os+' · '+device+' · '+innerWidth+'×'+innerHeight;
+}
+function renderDevices(items){
+ const box=document.getElementById('device-activity');box.replaceChildren();setText('device-count',(items||[]).length+' devices','');
+ if(!items?.length){box.textContent='No DNS activity has been observed yet.';return;}
+ const now=Date.now();
+ for(const x of items){
+  const c=document.createElement('div');c.className='device-item';
+  const n=document.createElement('div');n.className='name';n.textContent=x.device_name||x.device_id||'Unidentified device';
+  const last=x.last_seen_at?new Date(x.last_seen_at).getTime():0;const active=last&&now-last<=180000;
+  const l=document.createElement('div');l.className='line';l.innerHTML='<span>Activity</span><strong></strong>';l.lastChild.textContent=active?'Active recently':'No recent DNS activity';l.lastChild.className=active?'ok':'error';
+  const t=document.createElement('div');t.className='line';t.innerHTML='<span>Last seen</span><span></span>';t.lastChild.textContent=formatDateTime(x.last_seen_at);
+  const m=document.createElement('div');m.className='line';m.innerHTML='<span>Model</span><span></span>';m.lastChild.textContent=x.device_model||'—';
+  c.append(n,l,t,m);box.append(c);
+ }
 }
 function renderProfileHealth(items){
  const box=document.getElementById('profile-health');box.replaceChildren();
@@ -1665,6 +1766,7 @@ async function refresh(){
   const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
   const heroDot=document.getElementById('hero-dot');heroDot.className='dot '+(s.last_error?'':'ok');setText('hero-status',s.last_error?'Attention required':'Monitoring healthy',s.last_error?'error':'ok');
   const healthData=await api('/api/health');renderProfileHealth(healthData);
+  const devices=await api('/api/devices');renderDevices(devices);
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
   for(const a of accounts){const row=document.createElement('div');row.className='account';
@@ -1676,7 +1778,12 @@ async function refresh(){
   }
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
-  for(const x of alerts){const tr=document.createElement('tr');for(const k of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){const td=document.createElement('td');if(k==='event_timestamp'){formatTimestampCell(td,x[k]);}else{td.textContent=x[k]??'';}tr.append(td);}body.append(tr);}
+  for(const x of alerts){
+   const tr=document.createElement('tr');if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
+   const vals=[x.event_timestamp,x.account_name,x.device_name||x.device_id||'Unidentified',x.domain,x.status,x.reason,x.notification_status];
+   vals.forEach((v,i)=>{const td=document.createElement('td');if(i===0)formatTimestampCell(td,v);else td.textContent=v??'';tr.append(td);});
+   const td=document.createElement('td');const b=document.createElement('button');b.className='neutral';b.textContent=x.seen_at?'Seen':'NEW';b.onclick=async()=>{await api('/api/alerts/'+x.id+'/seen',{method:'POST'});refresh()};td.append(b);tr.append(td);body.append(tr);
+  }
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
@@ -1708,6 +1815,14 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
     @app.get("/api/alerts")
     def api_alerts() -> Any:
         return jsonify(store.recent_alerts())
+
+    @app.get("/api/devices")
+    def api_devices() -> Any:
+        return jsonify(store.device_states())
+
+    @app.post("/api/alerts/<int:alert_id>/seen")
+    def api_alert_seen(alert_id: int) -> Any:
+        return jsonify({"seen":store.mark_alert_seen(alert_id)})
 
     @app.get("/api/analytics")
     def api_analytics() -> Any:

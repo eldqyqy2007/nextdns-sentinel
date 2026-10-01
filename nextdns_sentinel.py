@@ -3749,6 +3749,14 @@ def request_json() -> dict[str, Any]:
 
 def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flask:
     app = Flask(__name__)
+    @app.after_request
+    def _dashboard_no_cache(response):
+        if request.path == "/" or request.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     app.secret_key = SECRET_KEY
     app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
 

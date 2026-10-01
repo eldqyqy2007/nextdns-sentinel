@@ -834,9 +834,14 @@ class Store:
                     before_json TEXT NOT NULL,
                     after_json TEXT NOT NULL,
                     changed_at TEXT NOT NULL,
-                    undone_at TEXT NOT NULL DEFAULT ''
+                    undone_at TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'unknown'
                 )
             """)
+            config_change_columns={row[1] for row in db.execute("PRAGMA table_info(config_changes)")}
+            if "source" not in config_change_columns:
+                db.execute("ALTER TABLE config_changes ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'")
+
 
 
     @staticmethod
@@ -1104,15 +1109,15 @@ class Store:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO config_snapshots(profile_id,snapshot,captured_at) VALUES(?,?,?) ON CONFLICT(profile_id) DO UPDATE SET snapshot=excluded.snapshot,captured_at=excluded.captured_at",(profile_id,json.dumps(snapshot,sort_keys=True,separators=(',',':')),utc_now()))
 
-    def add_config_change(self, profile_id: str, before: dict[str,Any], after: dict[str,Any], change_type: str) -> int:
+    def add_config_change(self, profile_id: str, before: dict[str,Any], after: dict[str,Any], change_type: str, source: str = "unknown") -> int:
         with sqlite3.connect(self.path) as db:
-            cur=db.execute("INSERT INTO config_changes(profile_id,change_type,before_json,after_json,changed_at) VALUES(?,?,?,?,?)",(profile_id,change_type,json.dumps(before,sort_keys=True),json.dumps(after,sort_keys=True),utc_now()))
+            cur=db.execute("INSERT INTO config_changes(profile_id,change_type,before_json,after_json,changed_at,source) VALUES(?,?,?,?,?,?)",(profile_id,change_type,json.dumps(before,sort_keys=True),json.dumps(after,sort_keys=True),utc_now(),source))
             return int(cur.lastrowid)
 
     def config_changes(self, limit:int=50) -> list[dict[str,Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory=sqlite3.Row
-            return [dict(r) for r in db.execute("SELECT id,profile_id,change_type,before_json,after_json,changed_at,undone_at FROM config_changes ORDER BY id DESC LIMIT ?",(limit,))]
+            return [dict(r) for r in db.execute("SELECT id,profile_id,change_type,before_json,after_json,changed_at,undone_at,source FROM config_changes ORDER BY id DESC LIMIT ?",(limit,))]
 
     def mark_change_undone(self, change_id:int) -> None:
         with sqlite3.connect(self.path) as db:
@@ -2467,7 +2472,7 @@ class Sentinel:
                         previous=self.store.config_snapshot(profile_id)
                         if previous is not None and previous != live_snapshot:
                             change_type=config_change_summary(previous,live_snapshot)
-                            change_id=self.store.add_config_change(profile_id,previous,live_snapshot,change_type)
+                            change_id=self.store.add_config_change(profile_id,previous,live_snapshot,change_type,"nextdns_profile")
                             key=hashlib.sha256(f"config:{profile_id}:{change_id}".encode()).hexdigest()
                             self.store.add_alert(profile_id,account["name"],"", "", "Configuration changed: "+change_type, "config_changed", "", utc_now(), key, "config_change", source="nextdns_profile")
                             alert_id=self.enrich_alert(key,account,"","Configuration changed: "+change_type,"config_changed","","",utc_now(),"","","","",False)
@@ -3386,31 +3391,39 @@ async function bulkDeny(action){
   await refresh();
  }catch(e){setText('bulk-result','Action failed: '+e.message,'error');}
 }
+function configChangeDiff(before,after,path=''){
+ const changes=[];const keys=new Set([...Object.keys(before||{}),...Object.keys(after||{})]);
+ for(const key of keys){
+  const p=path?path+'.'+key:key;const a=before?.[key],b=after?.[key];
+  if(a&&b&&typeof a==='object'&&typeof b==='object'&&!Array.isArray(a)&&!Array.isArray(b))changes.push(...configChangeDiff(a,b,p));
+  else if(JSON.stringify(a)!==JSON.stringify(b)){
+   if(a===undefined)changes.push({field:p,type:'added',before:'',after:b});
+   else if(b===undefined)changes.push({field:p,type:'removed',before:a,after:''});
+   else changes.push({field:p,type:'changed',before:a,after:b});
+  }
+ }
+ return changes;
+}
 async function loadConfigChanges(){
  try{
   const items=await api('/api/config-changes');const box=document.getElementById('config-changes');box.replaceChildren();
   if(!items.length){box.textContent='No configuration changes detected.';return;}
-  for(const x of items.slice(0,20)){
-   const row=document.createElement('div');row.className='account';
-   const title=document.createElement('div');title.textContent=x.profile_id+' · '+x.change_type+' · '+formatDateTime(x.changed_at);
-    const b=document.createElement('button');b.className='neutral';b.textContent=x.undone_at?'Undone':'Undo';b.disabled=!!x.undone_at;b.onclick=async()=>{
-      b.disabled=true;
-      try{
-        await api('/api/config-changes/'+x.id+'/undo',{method:'POST'});
-        await refresh();
-        await loadConfigChanges();
-        setText('account-message','Configuration change #'+x.id+' was undone successfully.','ok');
-      }catch(e){
-        b.disabled=false;
-        setText('account-message','Undo failed: '+e.message,'error');
-      }
-    };row.append(title,b);box.append(row);
+  for(const x of items.slice(0,50)){
+   const details=document.createElement('details');details.className='account';const summary=document.createElement('summary');summary.style.cursor='pointer';
+   summary.textContent=x.profile_id+' · '+x.change_type+' · '+formatDateTime(x.changed_at)+(x.undone_at?' · Undone':'');
+   const body=document.createElement('div');body.className='mini-list';const meta=document.createElement('div');meta.className='muted';meta.textContent='Trigger: '+(x.source||'unknown')+' · Time: '+formatDateTime(x.changed_at);body.append(meta);
+   let before={},after={};try{before=JSON.parse(x.before_json||'{}');after=JSON.parse(x.after_json||'{}');}catch(e){}
+   const diffs=configChangeDiff(before,after);
+   if(!diffs.length){const empty=document.createElement('div');empty.className='muted';empty.textContent='No field-level difference recorded.';body.append(empty);}
+   for(const diff of diffs.slice(0,100)){
+    const row=document.createElement('div');row.className='mini-item';const left=document.createElement('strong');left.textContent=diff.field;const right=document.createElement('span');right.textContent=diff.type==='added'?'Added: '+JSON.stringify(diff.after):diff.type==='removed'?'Removed: '+JSON.stringify(diff.before):JSON.stringify(diff.before)+' → '+JSON.stringify(diff.after);row.append(left,right);body.append(row);
+   }
+   const actions=document.createElement('div');const b=document.createElement('button');b.className='neutral';b.textContent=x.undone_at?'Undone':'Undo';b.disabled=!!x.undone_at;b.onclick=async()=>{b.disabled=true;try{await api('/api/config-changes/'+x.id+'/undo',{method:'POST'});await refresh();await loadConfigChanges();}catch(e){b.disabled=false;setText('account-message','Undo failed: '+e.message,'error');}};actions.append(b);body.append(actions);
+   details.append(summary,body);box.append(details);
   }
- }catch(e){}
+ }catch(e){setText('config-status','Unable to load configuration changes: '+e.message,'error');}
 }
-let configFormSource=null;
-function configLabel(key){return String(key).replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').replace(/\b\w/g,m=>m.toUpperCase());}
-function setConfigPath(root,path,value){let cursor=root;for(let i=0;i<path.length-1;i++){const key=path[i];if(cursor[key]===undefined||cursor[key]===null)cursor[key]=typeof path[i+1]==='number'?[]:{};cursor=cursor[key];}if(path.length)cursor[path[path.length-1]]=value;}
+
 function renderConfigReadable(value,path=''){
  const box=document.getElementById('config-readable');box.replaceChildren();
  const walk=(obj,prefix)=>{if(obj===null||typeof obj!=='object'){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=prefix||'value';row.lastChild.textContent=String(obj);box.append(row);return;}for(const [key,val] of Object.entries(obj)){const label=(prefix?prefix+'.':'')+key;if(val&&typeof val==='object'&&!Array.isArray(val)){const head=document.createElement('div');head.className='mini-item';head.innerHTML='<strong></strong><span></span>';head.firstChild.textContent=label;head.lastChild.textContent='section';box.append(head);walk(val,label);}else{const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=Array.isArray(val)?(val.length+' item(s)'):String(val);box.append(row);}}};
@@ -4142,7 +4155,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             live=client.profile(profile_id); after=config_snapshot(live)
             if before!=after:
                 change_type=config_change_summary(before,after)
-                change_id=store.add_config_change(profile_id,before,after,change_type)
+                change_id=store.add_config_change(profile_id,before,after,change_type,"sentinel_dashboard")
                 key=hashlib.sha256(f"config_action:{profile_id}:{change_id}".encode()).hexdigest()
                 store.add_alert(profile_id,account["name"],"","",f"Configuration changed from Sentinel dashboard: {change_type}","config_changed","",utc_now(),key,"config_change",source="sentinel_dashboard")
                 alert_id=sentinel.enrich_alert(key,account,"",f"Configuration changed from Sentinel dashboard: {change_type}","config_changed","","",utc_now(),"","","","",False)

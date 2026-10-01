@@ -640,6 +640,62 @@ class NextDNSClient:
         raise NextDNSError(f"NextDNS request failed: {last_error}")
 
 
+
+    def _patch(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self.BASE}{path}"
+        for attempt in range(API_RETRIES + 1):
+            try:
+                response = self.session.patch(url, json=payload, timeout=HTTP_TIMEOUT)
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After", "")
+                    try:
+                        retry_delay = float(retry_after) if retry_after else 2 ** attempt
+                    except (TypeError, ValueError):
+                        retry_delay = 2 ** attempt
+                    delay = min(retry_delay, 60.0)
+                    if attempt < API_RETRIES:
+                        logging.warning("NextDNS rate limit (429) for %s; retrying in %.1fs", path, delay)
+                        time.sleep(delay)
+                        continue
+                    raise NextDNSError("NextDNS API rate limit exceeded (HTTP 429).")
+                if response.status_code >= 500:
+                    delay = min(2 ** attempt, 30)
+                    if attempt < API_RETRIES:
+                        logging.warning("NextDNS server error (%s) for %s; retrying in %ss", response.status_code, path, delay)
+                        time.sleep(delay)
+                        continue
+                if not response.ok:
+                    detail = response.text.strip()[:500]
+                    if response.status_code == 401:
+                        message = "NextDNS API authentication failed (HTTP 401). Check the API key."
+                    elif response.status_code == 403:
+                        message = "NextDNS API access denied (HTTP 403). Check that the API key can modify this profile."
+                    elif response.status_code == 404:
+                        message = f"NextDNS resource not found (HTTP 404) for {path}."
+                    else:
+                        message = f"NextDNS API returned HTTP {response.status_code} for {path}."
+                    raise NextDNSError(f"{message} Response: {detail}")
+                if response.status_code == 204 or not response.content:
+                    return {}
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise NextDNSError(f"NextDNS API returned invalid JSON for {path}.") from exc
+                api_errors = data.get("errors") if isinstance(data, dict) else None
+                if api_errors:
+                    detail = json.dumps(api_errors, ensure_ascii=False, default=str)[:500]
+                    raise NextDNSError(f"NextDNS API returned application errors for {path}: {detail}")
+                if not isinstance(data, dict):
+                    raise NextDNSError(f"NextDNS API returned an unexpected response for {path}.")
+                return data
+            except requests.RequestException as exc:
+                if attempt >= API_RETRIES:
+                    raise NextDNSError(f"NextDNS request failed for {path}: {exc}") from exc
+                delay = min(2 ** attempt, 30)
+                logging.warning("Network error for %s; retrying in %ss: %s", path, delay, exc)
+                time.sleep(delay)
+        raise NextDNSError(f"NextDNS request failed for {path}.")
+
     def profiles(self) -> list[dict[str, Any]]:
         """Return profiles visible to the API key using the account profiles endpoint."""
         values: list[dict[str, Any]] = []
@@ -662,6 +718,12 @@ class NextDNSClient:
                 break
             cursor = next_cursor
         return values
+
+
+    def update_profile_name(self, profile_id: str, name: str) -> None:
+        if not name:
+            raise NextDNSError("NextDNS profile name is required.")
+        self._patch(f"/profiles/{profile_id}", {"name": name})
 
     def denylist(self, profile_id: str) -> list[str]:
         # The current NextDNS API exposes the profile's denylist in the
@@ -1161,7 +1223,7 @@ input{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1
 label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}
 table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}
 th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}code{color:#9ed0ff}
-.hidden{display:none}.account{padding:10px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.hidden{display:none}.account{padding:10px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}
 </style>
 </head>
 <body>
@@ -1185,6 +1247,19 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 <div class="status" id="account-message"></div>
 <div id="profile-picker" class="hidden"></div>
 <div id="accounts">Loading monitored profiles...</div>
+<div id="profile-editor" class="panel hidden">
+<h3>Edit Monitored Profile</h3>
+<form id="profile-edit-form">
+<label>Local Display Name<input name="name" required></label>
+<label>NextDNS Profile Name<input name="profile_name" required></label>
+<label>NextDNS Account API key<input name="api_key" type="password" placeholder="Leave blank to keep the current API key"></label>
+<div id="profile-meta" class="meta"></div>
+<div class="status muted">Profile ID is read-only. NextDNS profile changes use the API only.</div>
+<button class="start" type="submit">Save Changes</button>
+<button class="neutral" type="button" onclick="closeProfileEditor()">Cancel</button>
+</form>
+<div class="status" id="profile-edit-message"></div>
+</div>
 </div>
 
 <div class="panel">
@@ -1256,6 +1331,53 @@ document.getElementById('telegram-form').addEventListener('submit',async e=>{
 });
 async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
 async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});setText('telegram-status','Telegram disabled.','muted');}catch(e){setText('telegram-status',e.message,'error');}}
+let editingProfileId='';
+
+async function editProfile(id){
+  editingProfileId=id;
+  try{
+    const data=await api('/api/accounts/'+encodeURIComponent(id));
+    const form=document.getElementById('profile-edit-form');
+    form.elements.name.value=data.name||'';
+    form.elements.profile_name.value=data.profile_name||'';
+    form.elements.api_key.value='';
+    const p=data.profile||{};
+    const meta=document.getElementById('profile-meta');meta.replaceChildren();
+    const fields=[
+      ['Profile ID',data.profile_id],['Status',data.active?'Active':'Inactive'],
+      ['Denylist',p.denylist_entries??0],['Allowlist',p.allowlist_entries??0],
+      ['Blocklists',p.blocklists??0],['Parental Services',p.parental_services??0],
+      ['Parental Categories',p.parental_categories??0],['Logs',p.logs_enabled?'Enabled':'Disabled'],
+      ['Block Page',p.block_page_enabled?'Enabled':'Disabled'],['Web3',p.web3_enabled?'Enabled':'Disabled']
+    ];
+    for(const [label,value] of fields){
+      const item=document.createElement('div');
+      const strong=document.createElement('strong');strong.textContent=label;
+      const valueNode=document.createElement('span');valueNode.textContent=String(value);
+      item.append(strong,valueNode);meta.append(item);
+    }
+    document.getElementById('profile-editor').classList.remove('hidden');
+    setText('profile-edit-message','Live profile information loaded from NextDNS API.','ok');
+    document.getElementById('profile-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
+  }catch(e){setText('profile-edit-message',e.message,'error');}
+}
+function closeProfileEditor(){
+  editingProfileId='';
+  document.getElementById('profile-editor').classList.add('hidden');
+  document.getElementById('profile-edit-form').reset();
+  setText('profile-edit-message','','');
+}
+document.getElementById('profile-edit-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  if(!editingProfileId)return;
+  const data=Object.fromEntries(new FormData(e.target).entries());
+  try{
+    await api('/api/accounts/'+encodeURIComponent(editingProfileId),{method:'PATCH',body:JSON.stringify(data)});
+    closeProfileEditor();
+    refresh();
+  }catch(err){setText('profile-edit-message',err.message,'error');}
+});
+
 async function deleteAccount(id){if(!confirm('Delete this profile and its local state?'))return;try{await api('/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});refresh();}catch(e){alert(e.message);}}
 async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});refresh();}catch(e){alert(e.message);}}
 async function showDenylist(id){
@@ -1277,6 +1399,7 @@ async function refresh(){
    const title=document.createElement('div');title.textContent=a.name+' · '+a.profile_id+' · '+(a.active?'Active':'Inactive');row.append(title);
    const b=document.createElement('button');b.className=a.active?'stop':'start';b.textContent=a.active?'Disable':'Enable';b.onclick=()=>toggleAccount(a.profile_id,!a.active);row.append(b);
    const v=document.createElement('button');v.className='neutral';v.textContent='View Denylist';v.onclick=()=>showDenylist(a.profile_id);row.append(v);
+   const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=()=>editProfile(a.profile_id);row.append(edit);
    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);row.append(del);box.append(row);
   }
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
@@ -1378,6 +1501,98 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
                 if profile.get("id")
             ])
         except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/accounts/<profile_id>")
+    def api_account_detail(profile_id: str) -> Any:
+        accounts = store.accounts()
+        account = next((a for a in accounts if a["profile_id"] == profile_id), None)
+        if not account:
+            return jsonify({"error": "Account not found."}), 404
+        try:
+            profile_response = NextDNSClient(account["api_key"])._get(f"/profiles/{profile_id}")
+            profile = profile_response.get("data", profile_response)
+            if not isinstance(profile, dict):
+                raise NextDNSError("NextDNS returned an unexpected profile response.")
+            denylist = profile.get("denylist", [])
+            allowlist = profile.get("allowlist", [])
+            privacy = profile.get("privacy", {})
+            parental = profile.get("parentalControl", {})
+            settings = profile.get("settings", {})
+            logs = settings.get("logs", {}) if isinstance(settings, dict) else {}
+            block_page = settings.get("blockPage", {}) if isinstance(settings, dict) else {}
+            return jsonify({
+                "profile_id": profile_id,
+                "name": account["name"],
+                "profile_name": str(profile.get("name") or account["profile_name"] or profile_id),
+                "active": bool(account["active"]),
+                "added_at": account["added_at"],
+                "api_key_configured": bool(account["api_key"]),
+                "profile": {
+                    "denylist_entries": len(denylist) if isinstance(denylist, list) else 0,
+                    "allowlist_entries": len(allowlist) if isinstance(allowlist, list) else 0,
+                    "blocklists": len(privacy.get("blocklists", [])) if isinstance(privacy, dict) and isinstance(privacy.get("blocklists", []), list) else 0,
+                    "parental_services": len(parental.get("services", [])) if isinstance(parental, dict) and isinstance(parental.get("services", []), list) else 0,
+                    "parental_categories": len(parental.get("categories", [])) if isinstance(parental, dict) and isinstance(parental.get("categories", []), list) else 0,
+                    "logs_enabled": bool(logs.get("enabled")) if isinstance(logs, dict) else False,
+                    "block_page_enabled": bool(block_page.get("enabled")) if isinstance(block_page, dict) else False,
+                    "web3_enabled": bool(settings.get("web3")) if isinstance(settings, dict) else False,
+                },
+            })
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.patch("/api/accounts/<profile_id>")
+    def api_account_update(profile_id: str) -> Any:
+        accounts = store.accounts()
+        account = next((a for a in accounts if a["profile_id"] == profile_id), None)
+        if not account:
+            return jsonify({"error": "Account not found."}), 404
+        data = request_json()
+        display_name = str(data.get("name", account["name"])).strip()
+        profile_name = str(data.get("profile_name", account["profile_name"])).strip()
+        new_api_key = str(data.get("api_key", "")).strip()
+        if not display_name:
+            return jsonify({"error": "Local display name is required."}), 400
+        if not profile_name:
+            return jsonify({"error": "NextDNS profile name is required."}), 400
+        api_key = new_api_key or account["api_key"]
+        was_running = sentinel.is_running()
+        try:
+            client = NextDNSClient(api_key)
+            profile_response = client._get(f"/profiles/{profile_id}")
+            profile = profile_response.get("data", profile_response)
+            if not isinstance(profile, dict):
+                raise NextDNSError("NextDNS returned an unexpected profile response.")
+            current_profile_name = str(profile.get("name") or profile_id)
+            if profile_name != current_profile_name:
+                client.update_profile_name(profile_id, profile_name)
+            client.denylist(profile_id)
+            if was_running:
+                sentinel.stop()
+            store.upsert_account({
+                "profile_id": profile_id,
+                "name": display_name,
+                "profile_name": profile_name,
+                "api_key": api_key,
+                "active": bool(account["active"]),
+                "added_at": account["added_at"],
+            })
+            if was_running:
+                sentinel.start()
+            return jsonify({
+                "saved": True,
+                "profile_id": profile_id,
+                "name": display_name,
+                "profile_name": profile_name,
+                "running": sentinel.is_running(),
+            })
+        except Exception as exc:
+            if was_running and not sentinel.is_running():
+                try:
+                    sentinel.start()
+                except Exception:
+                    pass
             return jsonify({"error": str(exc)}), 400
 
     @app.post("/api/setup/account")

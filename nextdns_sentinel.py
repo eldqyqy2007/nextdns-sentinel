@@ -2931,7 +2931,7 @@ DASHBOARD = """<!doctype html>
 
 <div class="panel">
 <div class="section-head"><div><h2>Recent Alerts</h2><div class="muted">Search and inspect the latest security events</div></div><span id="alerts-count" class="pill">0 shown</span></div>
-<input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off">
+<div class="row"><input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off"><select id="alert-type-filter" style="max-width:260px"><option value="">All event types</option><option value="config_change">Profile config change</option><option value="configuration_action">Configuration action</option><option value="denylist_match">Blocked-site access</option><option value="denylist_added">Denylist added</option><option value="denylist_removed">Denylist removed</option><option value="device_inactive">Device event</option><option value="configuration_undo">Configuration undo</option></select></div>
 <div class="table-wrap"><table>
 <thead><tr><th>Event Time</th><th>Account</th><th>Device</th><th>Domain</th><th>Severity</th><th>Risk</th><th>Status</th><th>Reason</th><th>Notification</th><th>Seen</th></tr></thead>
 <tbody id="alerts"></tbody>
@@ -3129,10 +3129,12 @@ function renderTimeline(events){
 }
 function filterAlerts(){
  const q=(document.getElementById('alert-search').value||'').toLowerCase().trim();
+ const type=(document.getElementById('alert-type-filter')?.value||'').toLowerCase();
  let shown=0;
  document.querySelectorAll('#alerts tr').forEach(row=>{
-  const match=!q||row.textContent.toLowerCase().includes(q);
-  row.style.display=match?'':'none';if(match)shown++;
+  const matchText=!q||row.textContent.toLowerCase().includes(q);
+  const matchType=!type||String(row.dataset.alertType||'').toLowerCase()===type;
+  const match=matchText&&matchType;row.style.display=match?'':'none';if(match)shown++;
  });
  setText('alerts-count',shown+' shown','');
 }
@@ -3543,7 +3545,7 @@ async function refresh(){
   const alerts=await api('/api/alerts');notifyNewDenylistAlerts(alerts);const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
   for(const x of alerts){
-   const tr=document.createElement('tr');if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
+   const tr=document.createElement('tr');tr.dataset.alertType=x.alert_type||'';if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
    const vals=[x.event_timestamp,x.account_name,x.device_name||x.device_id||'Unidentified',x.domain,x.severity||'—',(x.risk_score??'—')+'/100',x.status,x.reason,x.notification_status];
    vals.forEach((v,i)=>{const td=document.createElement('td');if(i===0)formatTimestampCell(td,v);else td.textContent=v??'';tr.append(td);});
    const td=document.createElement('td');const b=document.createElement('button');b.className='neutral';b.textContent=x.seen_at?'Seen':'NEW';b.onclick=async()=>{await api('/api/alerts/'+x.id+'/seen',{method:'POST'});refresh()};td.append(b);tr.append(td);body.append(tr);
@@ -3551,7 +3553,7 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');showActionToast('Refresh failed: '+e.message,'error');}
 }
-setupDashboardPages();showPage(localStorage.getItem('sentinel_active_page')||'overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+setupDashboardPages();showPage(localStorage.getItem('sentinel_active_page')||'overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);document.getElementById('alert-type-filter').addEventListener('change',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
 function setupDashboardPages(){
  const map={
   overview:['stats','health','profile-health','event-timeline','hero-dot','runtime'],

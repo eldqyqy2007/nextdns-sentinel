@@ -3106,14 +3106,25 @@ function renderProfileHealth(items){
 function renderTimeline(events){
  const box=document.getElementById('event-timeline');box.replaceChildren();
  const items=Array.isArray(events)?events:[];
+ const groups=new Map();
+ for(const event of items){const key=event.profile_id||'system';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(event);}
  setText('timeline-count',items.length+' events','');
- if(!items.length){box.textContent='No timeline events available yet.';return;}
- for(const event of items.slice(0,20)){
-  const row=document.createElement('div');row.className='timeline-item';
-  const dot=document.createElement('span');dot.className='timeline-dot '+(event.kind||'warn');
-  const middle=document.createElement('div');const title=document.createElement('strong');title.textContent=event.title||'Event';const detail=document.createElement('div');detail.className='muted';detail.textContent=event.detail||'';middle.append(title,detail);
-  const time=document.createElement('span');time.className='muted';time.textContent=formatDateTime(event.time);time.title=event.time||'';
-  row.append(dot,middle,time);box.append(row);
+ if(!groups.size){box.textContent='No timeline events available yet.';return;}
+ for(const [profileId,group] of groups){
+  const card=document.createElement('details');card.className='account';
+  const summary=document.createElement('summary');summary.style.cursor='pointer';
+  const unseen=group.filter(x=>x.alert_id&&!x.seen).length;
+  summary.textContent=(profileId==='system'?'System':profileId)+' · '+group.length+' events'+(unseen?' · NEW '+unseen:'');
+  card.append(summary);
+  const list=document.createElement('div');list.className='timeline';list.style.marginTop='8px';
+  for(const event of group.slice(0,30)){
+   const row=document.createElement('div');row.className='timeline-item';const dot=document.createElement('span');dot.className='timeline-dot '+(event.kind||'warn');
+   const middle=document.createElement('div');const title=document.createElement('strong');title.textContent=event.title||'Event';const detail=document.createElement('div');detail.className='muted';detail.textContent=event.detail||'';middle.append(title,detail);
+   const time=document.createElement('span');time.className='muted';time.textContent=formatDateTime(event.time);row.append(dot,middle,time);list.append(row);
+  }
+  card.append(list);
+  card.addEventListener('toggle',async()=>{if(!card.open||card.dataset.seen)return;card.dataset.seen='1';const ids=group.filter(x=>x.alert_id&&!x.seen).map(x=>x.alert_id);for(const id of ids){try{await api('/api/alerts/'+id+'/seen',{method:'POST',_skipAutoRefresh:true});}catch(e){}}if(ids.length)await refresh();});
+  box.append(card);
  }
 }
 function filterAlerts(){
@@ -3747,7 +3758,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             events.append({"time":alert.get("event_timestamp") or alert.get("created_at") or "",
                            "title":alert.get("domain") or str(alert.get("alert_type") or "Security event").replace("_"," ").title(),
                            "detail":alert.get("reason") or alert.get("status") or "Security event",
-                           "kind":"warn","profile_id":alert.get("profile_id",""),"alert_id":alert.get("id")})
+                           "kind":"warn","profile_id":alert.get("profile_id",""),"alert_id":alert.get("id"),"seen":bool(alert.get("seen_at"))})
         for change in store.config_changes(100):
             events.append({"time":change.get("changed_at") or "","title":"Configuration change",
                            "detail":f'{change.get("profile_id","")} · {change.get("change_type","")}',

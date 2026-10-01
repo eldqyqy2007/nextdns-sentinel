@@ -114,7 +114,7 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
 
 ## <img src="./assets/icons/features.svg" alt="" width="24" height="24" align="absmiddle"> Feature Set
 
-### 🔎 Monitoring & Detection
+### <img src="./assets/icons/monitor.svg" alt="" width="20" height="20" align="absmiddle"> Monitoring & Detection
 
 - Multi-profile monitoring with independent workers.
 - NextDNS profile discovery through the API.
@@ -128,7 +128,7 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
 - Device inactivity detection and dedicated inactivity alerts.
 - Profile health, last successful poll, and latest monitor errors.
 
-### 🚨 Alerting & Response
+### <img src="./assets/icons/security.svg" alt="" width="20" height="20" align="absmiddle"> Alerting & Response
 
 - Alert severity and risk metadata.
 - Alert correlation into security incidents.
@@ -148,7 +148,7 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
 - Bulk-operation reporting with per-profile results.
 - Configuration-change and configuration-undo alerts.
 
-### 🧠 Security Intelligence
+### <img src="./assets/icons/features.svg" alt="" width="20" height="20" align="absmiddle"> Security Intelligence
 
 - Domain intelligence and risk context.
 - Historical risk analysis.
@@ -158,7 +158,7 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
 - Search across Sentinel's stored security data.
 - Security-focused event metadata for investigation.
 
-### 🖥️ Dashboard & Control Center
+### <img src="./assets/icons/dashboard.svg" alt="" width="20" height="20" align="absmiddle"> Dashboard & Control Center
 
 The dashboard provides a single local control surface for:
 
@@ -189,7 +189,7 @@ The dashboard provides a single local control surface for:
 
 The dashboard refreshes operational data automatically and also provides explicit refresh controls.
 
-### ⚙️ Configuration & API Controls
+### <img src="./assets/icons/config.svg" alt="" width="20" height="20" align="absmiddle"> Configuration & API Controls
 
 Sentinel can work with NextDNS profile configuration through API-backed controls, including scoped areas such as:
 
@@ -201,7 +201,7 @@ Sentinel can work with NextDNS profile configuration through API-backed controls
 
 Configuration changes are recorded with before/after state where supported, and Sentinel can safely undo a recorded change only when the live configuration still matches the expected post-change state.
 
-### 🔐 Security & Reliability
+### <img src="./assets/icons/security.svg" alt="" width="20" height="20" align="absmiddle"> Security & Reliability
 
 - Fernet encryption for locally stored API keys and Telegram secrets.
 - Automatic local secret generation.

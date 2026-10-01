@@ -595,10 +595,18 @@ class NextDNSClient:
                         continue
 
                 if not response.ok:
-                    detail = response.text.strip()[:300]
-                    raise NextDNSError(
-                        f"NextDNS API returned HTTP {response.status_code} for {path}: {detail}"
-                    )
+                    detail = response.text.strip()[:500]
+                    if response.status_code == 401:
+                        message = "NextDNS API authentication failed (HTTP 401). Check the API key."
+                    elif response.status_code == 403:
+                        message = "NextDNS API access denied (HTTP 403). Check that the API key can access this profile."
+                    elif response.status_code == 404:
+                        message = f"NextDNS resource not found (HTTP 404) for {path}. Check the Profile ID and API key access."
+                    elif response.status_code == 429:
+                        message = "NextDNS API rate limit exceeded (HTTP 429). Please retry shortly."
+                    else:
+                        message = f"NextDNS API returned HTTP {response.status_code} for {path}."
+                    raise NextDNSError(f"{message} Response: {detail}")
 
                 try:
                     data = response.json()
@@ -1187,8 +1195,15 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 <script>
 function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
 async function api(path,options={}){
- const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
- const d=await r.json().catch(()=>({})); if(!r.ok)throw new Error(d.error||'HTTP '+r.status); return d;
+  try{
+    const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'HTTP '+r.status);
+    return d;
+  }catch(e){
+    if(e instanceof TypeError)throw new Error('Dashboard could not reach the local API. Make sure Sentinel is running and try again.');
+    throw e;
+  }
 }
 async function controlMonitor(action){try{const d=await api('/api/monitor/'+action,{method:'POST'});setText('runtime',d.running?'Running':'Stopped',d.running?'ok':'muted');refresh();}catch(e){setText('runtime',e.message,'error');}}
 document.getElementById('account-form').addEventListener('submit',async e=>{
@@ -1320,7 +1335,8 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
             return jsonify({"error": "Profile ID and API key are required."}), 400
 
         try:
-            # Fetching the denylist validates both the API key and profile.
+            # Validate the profile and credentials through the NextDNS API only.
+            # No NextDNS web UI or scraping is used.
             NextDNSClient(api_key).denylist(profile_id)
             store.upsert_account({
                 "profile_id": profile_id,

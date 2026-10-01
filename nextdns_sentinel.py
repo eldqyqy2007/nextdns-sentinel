@@ -41,6 +41,9 @@ MAX_NOTIFICATION_ATTEMPTS = max(1, int(os.getenv("NEXTDNS_SENTINEL_MAX_NOTIFICAT
 SECRET_KEY_FILE = Path(
     os.getenv("NEXTDNS_SENTINEL_SECRET_FILE", "data/.sentinel_secret")
 )
+ALERT_LOG_PATH = Path(
+    os.getenv("NEXTDNS_SENTINEL_ALERT_LOG", "data/recent_alerts.jsonl")
+)
 
 
 def load_or_create_secret_key() -> str:
@@ -205,6 +208,38 @@ class Store:
                 ),
             )
 
+    def set_setting(self, key: str, value: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return str(row[0]) if row else default
+
+    def save_alert_logs_enabled(self) -> bool:
+        return self.get_setting("save_alert_logs", "true").lower() == "true"
+
+    def set_save_alert_logs_enabled(self, enabled: bool) -> None:
+        self.set_setting("save_alert_logs", "true" if enabled else "false")
+
+    def export_alerts_to_file(self) -> int:
+        ALERT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        alerts = self.recent_alerts(limit=1000000)
+        with ALERT_LOG_PATH.open("w", encoding="utf-8") as handle:
+            for alert in reversed(alerts):
+                handle.write(json.dumps(alert, ensure_ascii=False, default=str) + "\n")
+        return len(alerts)
+
+    def append_alert_to_file(self, alert: dict[str, Any]) -> None:
+        ALERT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ALERT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(alert, ensure_ascii=False, default=str) + "\n")
+
     def set_secret(self, key: str, value: str) -> None:
         encrypted = self.cipher.encrypt(value.encode()).decode()
         with sqlite3.connect(self.path) as db:
@@ -323,6 +358,21 @@ class Store:
                         event_key,
                         utc_now(),
                     ),
+                )
+            if self.save_alert_logs_enabled():
+                self.append_alert_to_file(
+                    {
+                        "profile_id": profile_id,
+                        "account_name": account_name,
+                        "domain": domain,
+                        "matched_domain": matched_domain,
+                        "reason": reason,
+                        "status": status,
+                        "client_ip": client_ip,
+                        "event_timestamp": event_timestamp,
+                        "event_key": event_key,
+                        "created_at": utc_now(),
+                    }
                 )
             return True
         except sqlite3.IntegrityError as exc:
@@ -1293,6 +1343,14 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 <div id="denylist">Select a profile to view its cached entries.</div>
 </div>
 
+<div class="panel">
+<h2>Alert Log Storage</h2>
+<label class="row"><input id="save-alert-logs" type="checkbox" style="width:auto;margin:0 8px 0 0"> Save Recent Alerts to file automatically</label>
+<p class="muted">Alerts are also kept in SQLite. When enabled, each new alert is appended immediately to <code>data/recent_alerts.jsonl</code>.</p>
+<button class="neutral" type="button" onclick="exportAlertLogs()">Save Existing Alerts to File</button>
+<div class="status" id="alert-log-status">Checking...</div>
+</div>
+
 <h2>Recent Alerts</h2>
 <table>
 <thead><tr><th>Event Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th></tr></thead>
@@ -1300,6 +1358,14 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 </table>
 </main>
 <script>
+function formatDateTime(value){
+ if(!value)return '—';
+ const d=new Date(value);
+ if(Number.isNaN(d.getTime()))return String(value);
+ return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'medium'}).format(d);
+}
+function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
+
 function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
 async function api(path,options={}){
   try{
@@ -1424,13 +1490,38 @@ async function showDenylist(id){
  for(const d of list.slice(0,200)){const x=document.createElement('div');x.textContent=d;box.append(x);}
  }catch(e){setText('denylist',e.message,'error');}
 }
+async function loadAlertLogSettings(){
+ try{
+  const d=await api('/api/settings/alert-logs');
+  const checkbox=document.getElementById('save-alert-logs');
+  checkbox.checked=!!d.enabled;
+  setText('alert-log-status',d.enabled?'Automatic file saving is enabled.':'Automatic file saving is disabled.','muted');
+ }catch(e){setText('alert-log-status',e.message,'error');}
+}
+async function setAlertLogSaving(enabled){
+ try{
+  const d=await api('/api/settings/alert-logs',{method:'POST',body:JSON.stringify({enabled})});
+  setText('alert-log-status',d.enabled?'Automatic saving enabled.':'Automatic saving disabled.','ok');
+ }catch(e){
+  document.getElementById('save-alert-logs').checked=!enabled;
+  setText('alert-log-status',e.message,'error');
+ }
+}
+async function exportAlertLogs(){
+ try{
+  const d=await api('/api/settings/alert-logs/export',{method:'POST'});
+  setText('alert-log-status',d.count+' alert(s) saved to '+d.path+'.','ok');
+ }catch(e){setText('alert-log-status',e.message,'error');}
+}
+document.getElementById('save-alert-logs').addEventListener('change',e=>setAlertLogSaving(e.target.checked));
+
 async function refresh(){
  try{
   const rt=await api('/api/runtime');setText('runtime',rt.running?'Running':'Stopped',rt.running?'ok':'muted');
   setText('telegram-status',rt.telegram_configured?'Telegram configured.':'Telegram not configured.',rt.telegram_configured?'ok':'muted');
   const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
   for(const [k,v] of Object.entries(s)){if(k.startsWith('last_'))continue;const card=document.createElement('div');card.className='card';const l=document.createElement('div');l.className='muted';l.textContent=k.replaceAll('_',' ');const val=document.createElement('div');val.className='value';val.textContent=v;card.append(l,val);stats.append(card);}
-  const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+(s.last_error_at||''):'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
+  const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
   for(const a of accounts){const row=document.createElement('div');row.className='account';
@@ -1441,10 +1532,10 @@ async function refresh(){
    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);row.append(del);box.append(row);
   }
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
-  for(const x of alerts){const tr=document.createElement('tr');for(const k of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){const td=document.createElement('td');td.textContent=x[k]??'';tr.append(td);}body.append(tr);}
+  for(const x of alerts){const tr=document.createElement('tr');for(const k of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){const td=document.createElement('td');if(k==='event_timestamp'){formatTimestampCell(td,x[k]);}else{td.textContent=x[k]??'';}tr.append(td);}body.append(tr);}
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
-refresh();setInterval(refresh,5000);
+loadAlertLogSettings();refresh();setInterval(refresh,5000);
 </script>
 </body>
 </html>"""
@@ -1502,6 +1593,32 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
                 sentinel.telegram_token and sentinel.telegram_chat_id
             )
         })
+
+    @app.get("/api/settings/alert-logs")
+    def api_alert_log_settings() -> Any:
+        return jsonify({
+            "enabled": store.save_alert_logs_enabled(),
+            "path": str(ALERT_LOG_PATH),
+        })
+
+    @app.post("/api/settings/alert-logs")
+    def api_alert_log_settings_save() -> Any:
+        data = request_json()
+        enabled = bool(data.get("enabled"))
+        store.set_save_alert_logs_enabled(enabled)
+        count = 0
+        if enabled:
+            count = store.export_alerts_to_file()
+        return jsonify({
+            "enabled": enabled,
+            "path": str(ALERT_LOG_PATH),
+            "exported": count,
+        })
+
+    @app.post("/api/settings/alert-logs/export")
+    def api_alert_log_export() -> Any:
+        count = store.export_alerts_to_file()
+        return jsonify({"saved": True, "count": count, "path": str(ALERT_LOG_PATH)})
 
     @app.get("/api/denylist/<profile_id>")
     def api_denylist(profile_id: str) -> Any:

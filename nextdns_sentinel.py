@@ -858,6 +858,17 @@ Client IP: {client_ip}"
                             )
 
                 for alert in self.store.unnotified_alerts(profile_id):
+                    if self.store.was_recently_notified(
+                        profile_id, alert["domain"], ALERT_COOLDOWN
+                    ):
+                        self.store.mark_alert_suppressed(alert["event_key"])
+                        logging.info(
+                            "Suppressing delayed notification because %s was "
+                            "already notified during the cooldown.",
+                            alert["domain"],
+                        )
+                        continue
+
                     delivered = self.notify(
                         account,
                         alert["domain"],

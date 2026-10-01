@@ -3142,15 +3142,21 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             with tempfile.NamedTemporaryFile(prefix="sentinel-restore-",suffix=".db",delete=False) as tmp:
                 temp_path=Path(tmp.name)
                 upload.save(tmp)
+            rollback_path=DB_PATH.with_suffix(".pre-restore.db")
             with sqlite3.connect(temp_path) as source:
-                source.execute("PRAGMA integrity_check")
+                integrity=source.execute("PRAGMA integrity_check").fetchone()
+                if not integrity or str(integrity[0]).lower()!="ok":
+                    raise sqlite3.DatabaseError("SQLite integrity check failed.")
+                if DB_PATH.exists():
+                    shutil.copy2(DB_PATH,rollback_path)
+                if was_running:
+                    sentinel.stop()
                 with sqlite3.connect(DB_PATH) as dest:
                     source.backup(dest)
             if was_running:
-                sentinel.stop()
                 sentinel.start()
-            features.heartbeat("restored")
-            features.audit("database_restore","database",str(DB_PATH),details={"filename":upload.filename})
+            features.heartbeat("restored",{"rollback":str(rollback_path) if rollback_path.exists() else ""})
+            features.audit("database_restore","database",str(DB_PATH),details={"filename":upload.filename,"rollback":str(rollback_path) if rollback_path.exists() else ""})
             return jsonify({"restored":True,"running":sentinel.is_running()})
         except sqlite3.Error as exc:
             return jsonify({"error":f"Invalid SQLite backup: {exc}"}),400

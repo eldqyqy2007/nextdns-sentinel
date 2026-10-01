@@ -2800,11 +2800,8 @@ DASHBOARD = """<!doctype html>
 </div>
 <div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile overview</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option><option value="denylist">Denylist</option><option value="allowlist">Allowlist</option></select></div>
 <div id="config-readable" class="mini-list"><div class="muted">Load a section to see a human-readable summary.</div></div>
-<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Advanced JSON editor</summary>
-<p class="muted">Example: change a boolean such as <code>true</code>/<code>false</code>, a list item, or a supported setting value. Keep the JSON structure intact. Sentinel validates the request through the NextDNS API and shows the returned error if NextDNS rejects it.</p>
-<textarea id="config-json" rows="16" style="width:100%;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;font-family:monospace"></textarea>
-</details>
-<div class="row"><button class="neutral" onclick="loadConfigSection()">Load Live Configuration</button><button class="start" onclick="saveConfigSection()">Apply Changes</button></div>
+<div id="config-form" class="scalable-list"><div class="muted">Load live configuration to edit supported fields.</div></div>
+<div class="row"><button class="neutral" onclick="loadConfigSection()">Load Live Configuration</button><button class="neutral" onclick="clearConfigForm()">Clear</button><button class="start" onclick="saveConfigSection()">Apply Changes</button></div>
 <div class="status" id="config-status">Select a profile and load its live configuration.</div>
 </div>
 <div class="panel">
@@ -3398,39 +3395,30 @@ async function loadConfigChanges(){
   }
  }catch(e){}
 }
+let configFormSource=null;
+function configLabel(key){return String(key).replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').replace(/\b\w/g,m=>m.toUpperCase());}
+function setConfigPath(root,path,value){let cursor=root;for(let i=0;i<path.length-1;i++){const key=path[i];if(cursor[key]===undefined||cursor[key]===null)cursor[key]=typeof path[i+1]==='number'?[]:{};cursor=cursor[key];}if(path.length)cursor[path[path.length-1]]=value;}
 function renderConfigReadable(value,path=''){
  const box=document.getElementById('config-readable');box.replaceChildren();
- const walk=(obj,prefix)=>{
-  if(obj===null||typeof obj!=='object'){
-   const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=prefix||'value';row.lastChild.textContent=String(obj);box.append(row);return;
-  }
-  for(const [key,val] of Object.entries(obj)){
-   const label=(prefix?prefix+'.':'')+key;
-   if(val&&typeof val==='object'&&!Array.isArray(val)){const head=document.createElement('div');head.className='mini-item';head.innerHTML='<strong></strong><span></span>';head.firstChild.textContent=label;head.lastChild.textContent='section';box.append(head);walk(val,label);}
-   else {const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=Array.isArray(val)?(val.length+' item(s)'):String(val);box.append(row);}
-  }
- };
+ const walk=(obj,prefix)=>{if(obj===null||typeof obj!=='object'){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=prefix||'value';row.lastChild.textContent=String(obj);box.append(row);return;}for(const [key,val] of Object.entries(obj)){const label=(prefix?prefix+'.':'')+key;if(val&&typeof val==='object'&&!Array.isArray(val)){const head=document.createElement('div');head.className='mini-item';head.innerHTML='<strong></strong><span></span>';head.firstChild.textContent=label;head.lastChild.textContent='section';box.append(head);walk(val,label);}else{const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=Array.isArray(val)?(val.length+' item(s)'):String(val);box.append(row);}}};
  walk(value,path);
 }
-async function loadConfigSection(){
- const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;if(!id)return;
- try{const d=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section));document.getElementById('config-json').value=JSON.stringify(d,null,2);renderConfigReadable(d);setText('config-status','Live configuration loaded. Review the readable fields before applying changes.','ok');}catch(e){setText('config-status','Load failed: '+e.message,'error');}
+function buildConfigControl(value,path,label,parent){
+ if(value&&typeof value==='object'&&!Array.isArray(value)){
+  const details=document.createElement('details');details.open=true;details.style.margin='6px 0';const summary=document.createElement('summary');summary.style.cursor='pointer';summary.textContent=configLabel(label);details.append(summary);
+  for(const [key,val] of Object.entries(value))buildConfigControl(val,path.concat(key),key,details);parent.append(details);return;
+ }
+ const row=document.createElement('label');row.style.margin='6px 0';row.textContent=configLabel(label);
+ if(Array.isArray(value)){const input=document.createElement('textarea');input.rows=Math.min(8,Math.max(2,value.length+1));input.dataset.path=JSON.stringify(path);input.dataset.kind='array-json';input.value=JSON.stringify(value,null,2);input.style.width='100%';row.append(input);}
+ else{const input=document.createElement('input');input.dataset.path=JSON.stringify(path);if(typeof value==='boolean'){input.type='checkbox';input.checked=value;input.dataset.kind='boolean';}else if(typeof value==='number'){input.type='number';input.step=Number.isInteger(value)?'1':'any';input.value=String(value);input.dataset.kind='number';}else{input.type='text';input.value=value==null?'':String(value);input.dataset.kind='string';}row.append(input);}
+ parent.append(row);
 }
-async function saveConfigSection(){
- const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;let data;
- try{data=JSON.parse(document.getElementById('config-json').value)}catch(e){setText('config-status','Invalid JSON.','error');return;}
- if(!data||Array.isArray(data)||typeof data!=='object'){setText('config-status','Configuration must be a JSON object.','error');return;}
- try{
-  const preview=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(Object.assign({},data,{_preview:true}))});
-  const changed=preview.changed_fields||[];
-  if(!changed.length){setText('config-status','No changes detected. Nothing will be sent to NextDNS.','muted');return;}
-  const summary='Fields changed: '+changed.join(', ')+'\\n\\nApply these changes to the selected NextDNS profile?';
-  if(!confirm(summary))return;
-  await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});
-  setText('config-status','Change applied successfully and verified against the live profile.','ok');
-  await refresh();await loadConfigChanges();await loadConfigSection();
- }catch(e){setText('config-status','Change failed: '+e.message,'error');}
-}
+function renderConfigForm(value){const box=document.getElementById('config-form');box.replaceChildren();configFormSource=JSON.parse(JSON.stringify(value||{}));if(!value||typeof value!=='object'){box.textContent='No editable configuration was returned.';return;}for(const [key,val] of Object.entries(value))buildConfigControl(val,[key],key,box);}
+function collectConfigForm(){const result=JSON.parse(JSON.stringify(configFormSource||{}));document.querySelectorAll('#config-form [data-path]').forEach(input=>{const path=JSON.parse(input.dataset.path);let value;if(input.dataset.kind==='boolean')value=!!input.checked;else if(input.dataset.kind==='number')value=input.value===''?null:Number(input.value);else if(input.dataset.kind==='array-json'){try{value=JSON.parse(input.value||'[]');}catch(e){throw new Error('Invalid array JSON for '+path.join('.'));}}else value=input.value;setConfigPath(result,path,value);});return result;}
+function clearConfigForm(){if(configFormSource)renderConfigForm(configFormSource);}
+async function loadConfigSection(){const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;if(!id)return;try{const d=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section));renderConfigForm(d);renderConfigReadable(d);setText('config-status','Live configuration loaded. Edit the fields below and apply when ready.','ok');}catch(e){setText('config-status','Load failed: '+e.message,'error');}}
+async function saveConfigSection(){const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;let data;try{data=collectConfigForm();}catch(e){setText('config-status',e.message,'error');return;}try{const preview=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(Object.assign({},data,{_preview:true}))});const changed=preview.changed_fields||[];if(!changed.length){setText('config-status','No changes detected. Nothing will be sent to NextDNS.','muted');return;}if(!confirm('Fields changed: '+changed.join(', ')+'\n\nApply these changes to the selected NextDNS profile?'))return;await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});setText('config-status','Change applied successfully and verified against the live profile.','ok');await refresh();await loadConfigChanges();await loadConfigSection();}catch(e){setText('config-status','Change failed: '+e.message,'error');}}
+
 async function loadAlertLogSettings(){
  try{
   const d=await api('/api/settings/alert-logs');

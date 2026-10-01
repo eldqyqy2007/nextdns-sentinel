@@ -2844,17 +2844,13 @@ DASHBOARD = """<!doctype html>
 <label>Bot token<input name="token" type="password" placeholder="123456:ABC..."></label>
 <label>Chat ID<input name="chat_id" placeholder="Telegram chat ID"></label>
 <button class="start" type="submit">Add / Save Bot</button>
-<button class="neutral" type="button" onclick="testTelegram()">Send Test</button>
-<button class="start" type="button" onclick="enableTelegram()">Enable</button>
-<button class="stop" type="button" onclick="disableTelegram()">Disable</button>
-<button class="stop" type="button" onclick="deleteTelegramCredentials()">Delete Bot</button>
-<button class="neutral" type="button" onclick="editTelegram()">Edit Bot</button>
 </form>
 <div class="status" id="telegram-status">Checking...</div>
 <div class="mini-list" id="telegram-bot-card"><div class="muted">Loading Telegram bots...</div></div>
 <div id="telegram-editor" class="editor hidden">
 <strong>Edit Telegram Bot</strong>
 <form id="telegram-edit-form">
+<label>Bot name<input name="name" placeholder="Telegram Bot"></label>
 <label>Bot token<input name="token" type="password" placeholder="Leave blank to keep the current token"></label>
 <label>Chat ID<input name="chat_id" placeholder="Telegram chat ID"></label>
 <button class="start" type="submit">Save Bot Changes</button>
@@ -3262,7 +3258,7 @@ async function testTelegramBot(id){try{await api('/api/settings/telegram/bots/'+
 async function deleteTelegramBot(id){if(!confirm('Delete this Telegram bot?'))return;try{await api('/api/settings/telegram/bots/'+id,{method:'DELETE'});setText('telegram-status','Telegram bot deleted.','muted');await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function editTelegramBot(id){
  try{const bots=await api('/api/settings/telegram/bots');const bot=bots.find(x=>Number(x.id)===Number(id));if(!bot)throw new Error('Telegram bot not found.');
-  const form=document.getElementById('telegram-edit-form');form.dataset.botId=String(id);form.elements.chat_id.value=bot.chat_id||'';form.elements.token.value='';
+  const form=document.getElementById('telegram-edit-form');form.dataset.botId=String(id);form.elements.name.value=bot.name||'Telegram Bot';form.elements.chat_id.value=bot.chat_id||'';form.elements.token.value='';
   document.getElementById('telegram-editor').classList.remove('hidden');setText('telegram-edit-message','Editing '+bot.name+'. Leave token blank to keep it.','muted');document.getElementById('telegram-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
  }catch(e){setText('telegram-status',e.message,'error');}
 }
@@ -3270,17 +3266,7 @@ async function deleteTelegramCredentials(){if(!confirm('Delete the saved Telegra
 async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
 async function enableTelegram(){try{const d=await api('/api/settings/telegram/enable',{method:'POST'});setText('telegram-status','Enabled · '+(d.status||'ready'),'ok');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});closeTelegramEditor();setText('telegram-status','Telegram disabled. Saved bot credentials were kept.','muted');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
-async function editTelegram(){
- try{
-  const d=await api('/api/settings/telegram');
-  const form=document.getElementById('telegram-edit-form');
-  form.elements.chat_id.value=d.chat_id||'';
-  form.elements.token.value='';
-  document.getElementById('telegram-editor').classList.remove('hidden');
-  setText('telegram-edit-message',d.configured?'Current Telegram bot settings loaded.':'Telegram is not configured.','muted');
-  document.getElementById('telegram-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
- }catch(e){setText('telegram-status',e.message,'error');}
-}
+async function editTelegram(){const bots=await api('/api/settings/telegram/bots');if(bots.length)editTelegramBot(bots[0].id);}
 function closeTelegramEditor(){
  document.getElementById('telegram-editor').classList.add('hidden');
  document.getElementById('telegram-edit-form').reset();
@@ -3288,12 +3274,13 @@ function closeTelegramEditor(){
 }
 document.getElementById('telegram-edit-form').addEventListener('submit',async e=>{
  e.preventDefault();
- const d=Object.fromEntries(new FormData(e.target).entries());
+ const d=Object.fromEntries(new FormData(e.target).entries());d.id=e.target.dataset.botId;
+ if(!d.id){setText('telegram-edit-message','Select a Telegram bot to edit.','error');return;}
  try{
-  await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});
+  await api('/api/settings/telegram/bots',{method:'POST',body:JSON.stringify(d)});
   closeTelegramEditor();
   setText('telegram-status','Telegram bot updated and encrypted locally.','ok');
-  refresh();
+  await refresh();
  }catch(err){setText('telegram-edit-message',err.message,'error');}
 });
 

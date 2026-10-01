@@ -247,6 +247,23 @@ class Store:
                 (utc_now(), event_key),
             )
 
+    def unnotified_alerts(self, profile_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            return [
+                dict(r)
+                for r in db.execute(
+                    """
+                    SELECT event_key,account_name,domain,matched_domain,reason,status,
+                           client_ip,event_timestamp
+                    FROM alerts
+                    WHERE profile_id=? AND notified_at=''
+                    ORDER BY id ASC LIMIT ?
+                    """,
+                    (profile_id, limit),
+                )
+            ]
+
     def set_poll_state(
         self, profile_id: str, last_poll_ms: int, error: str = ""
     ) -> None:
@@ -714,6 +731,19 @@ Client IP: {client_ip}"
                                 "Telegram notification suppressed by cooldown for %s",
                                 domain,
                             )
+
+                for alert in self.store.unnotified_alerts(profile_id):
+                    delivered = self.notify(
+                        account,
+                        alert["domain"],
+                        alert["reason"],
+                        alert["status"],
+                        alert["matched_domain"],
+                        alert["client_ip"],
+                        alert["event_timestamp"],
+                    )
+                    if delivered:
+                        self.store.mark_alert_notified(alert["event_key"])
 
                 self.store.set_poll_state(profile_id, now_ms)
                 if self.stop_event:

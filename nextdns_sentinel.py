@@ -241,7 +241,7 @@ class FeatureStore:
                           VALUES(?,?,?,?,?)
                           ON CONFLICT(profile_id,bucket_day,bucket_hour) DO UPDATE SET
                           count=anomaly_baseline.count+excluded.count,
-                          updated_at=excluded.updated_at""",(profile_id,str(bucket_hour),str(bucket_hour),int(count or 0),str(updated_at or now_iso())))
+                          updated_at=excluded.updated_at""",(profile_id,day,str(bucket_hour),int(count or 0),str(updated_at or now_iso())))
         db.execute("DROP TABLE anomaly_baseline_legacy")
 
     @staticmethod
@@ -2851,7 +2851,7 @@ DASHBOARD = """<!doctype html>
 <div id="profile-health" class="health-grid"><div class="muted">Loading...</div></div>
 </div>
 
-<div class="panel"><div class="section-head"><div><h2>Device Activity</h2><div class="muted">Last observed DNS activity; inactivity does not prove DNS was disabled.</div></div><span id="device-count" class="pill">0 devices</span></div><div id="device-activity" class="device-state"><div class="muted">Loading...</div></div></div>
+<div class="panel"><div class="section-head"><div><h2>Device Activity</h2><div class="muted">Last observed DNS activity; inactivity does not prove DNS was disabled.</div></div><span id="device-count" class="pill">0 devices</span></div><div id="device-activity" class="device-state"><div class="muted">Loading...</div></div></div><div id="device-detail-panel" class="panel hidden"><div class="section-head"><div><h2>Device Details</h2><div id="device-detail-subtitle" class="muted"></div></div><button type="button" class="neutral" onclick="closeDeviceDetail()">Close</button></div><div id="device-detail-content" class="mini-list"></div></div>
 <div id="device-editor" class="panel hidden"><h3>Edit Device</h3><form id="device-edit-form">
 <input type="hidden" name="profile_id"><input type="hidden" name="device_id">
 <label>Device Name<input name="device_name"></label><label>Device Model<input name="device_model"></label>
@@ -3082,15 +3082,18 @@ document.getElementById('device-edit-form')?.addEventListener('submit',async e=>
 async function loadDeviceDetail(profileId,deviceId){
  try{
   const d=await api('/api/devices/'+encodeURIComponent(profileId)+'/'+encodeURIComponent(deviceId));
-  const box=document.getElementById('operations-center');box.replaceChildren();
-  const title=document.createElement('div');title.className='mini-item';title.innerHTML='<strong></strong><span></span>';
-  title.firstChild.textContent=(d.device?.device_name||deviceId)+' investigation';
-  title.lastChild.textContent='Profile '+profileId;
-  box.append(title);
-  for(const a of d.alerts||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=(a.severity||'medium').toUpperCase()+' · '+(a.domain||a.alert_type);row.lastChild.textContent=formatDateTime(a.event_timestamp||a.created_at);row.title=a.reason||'';box.append(row);}
-  box.scrollIntoView({behavior:'smooth',block:'nearest'});
- }catch(e){setText('operations-center',e.message,'error');}
+  const panel=document.getElementById('device-detail-panel');const box=document.getElementById('device-detail-content');if(!panel||!box)return;
+  panel.classList.remove('hidden');box.replaceChildren();
+  const device=d.device||{};
+  setText('device-detail-subtitle',(device.account_name||profileId)+' · '+(device.device_name||deviceId)+' · '+(d.alerts?.length||0)+' alerts','muted');
+  const fields=[['Device ID',device.device_id],['Model',device.device_model],['Client IP',device.client_ip],['Status',device.last_status],['Last Domain',device.last_domain],['Last Seen',formatDateTime(device.last_seen_at)]];
+  for(const [label,value] of fields){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=value||'—';box.append(row);}
+  const heading=document.createElement('div');heading.className='muted';heading.style.marginTop='8px';heading.textContent='Recent device alerts';box.append(heading);
+  for(const a of d.alerts||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=(a.alert_type||'event')+' · '+(a.domain||a.reason||'No domain');row.lastChild.textContent=formatDateTime(a.event_timestamp||a.created_at);row.title=a.reason||'';box.append(row);}
+  panel.scrollIntoView({behavior:'smooth',block:'nearest'});
+ }catch(e){setText('device-detail-content','Details failed: '+e.message,'error');}
 }
+function closeDeviceDetail(){document.getElementById('device-detail-panel')?.classList.add('hidden');}
 async function loadIncidentDetail(id){
  try{
   const d=await api('/api/incidents/'+id);const box=document.getElementById('operations-center');box.replaceChildren();

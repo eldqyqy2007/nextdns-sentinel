@@ -959,9 +959,23 @@ class Store:
 
     def delete_account(self, profile_id: str) -> None:
         with sqlite3.connect(self.path) as db:
-            db.execute("DELETE FROM accounts WHERE profile_id=?", (profile_id,))
+            alert_ids=[row[0] for row in db.execute("SELECT id FROM alerts WHERE profile_id=?", (profile_id,)).fetchall()]
+            if alert_ids:
+                placeholders=",".join("?" for _ in alert_ids)
+                db.execute(f"DELETE FROM alert_metadata WHERE alert_id IN ({placeholders})", alert_ids)
+                db.execute(f"DELETE FROM incident_alerts WHERE alert_id IN ({placeholders})", alert_ids)
+                db.execute(f"DELETE FROM delivery_events WHERE alert_id IN ({placeholders})", alert_ids)
+                db.execute(f"DELETE FROM escalation_events WHERE alert_id IN ({placeholders})", alert_ids)
+            db.execute("DELETE FROM incidents WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM alerts WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM audit_log WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM anomaly_baseline WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM device_state WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM config_changes WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM config_snapshots WHERE profile_id=?", (profile_id,))
             db.execute("DELETE FROM denylist WHERE profile_id=?", (profile_id,))
             db.execute("DELETE FROM monitor_state WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM accounts WHERE profile_id=?", (profile_id,))
 
     def account_exists(self, profile_id: str) -> bool:
         with sqlite3.connect(self.path) as db:

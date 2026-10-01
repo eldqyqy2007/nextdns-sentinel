@@ -211,6 +211,27 @@ class FeatureStore:
                 created_at TEXT NOT NULL
             );
             """)
+            self._migrate_unique_constraints(db)
+
+    @staticmethod
+    def _migrate_unique_constraints(db: sqlite3.Connection) -> None:
+        # Older Sentinel databases may have been created before the composite
+        # keys were declared. Deduplicate legacy rows before creating the
+        # unique indexes required by the ON CONFLICT statements.
+        migrations = [
+            ("alert_metadata", "DELETE FROM alert_metadata WHERE rowid NOT IN (SELECT MAX(rowid) FROM alert_metadata GROUP BY alert_id)",
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_metadata_alert_unique ON alert_metadata(alert_id)"),
+            ("domain_intelligence", "DELETE FROM domain_intelligence WHERE rowid NOT IN (SELECT MAX(rowid) FROM domain_intelligence GROUP BY domain)",
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_domain_intelligence_domain_unique ON domain_intelligence(domain)"),
+            ("anomaly_baseline", "DELETE FROM anomaly_baseline WHERE rowid NOT IN (SELECT MAX(rowid) FROM anomaly_baseline GROUP BY profile_id,bucket_hour)",
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_anomaly_baseline_profile_hour_unique ON anomaly_baseline(profile_id,bucket_hour)"),
+            ("sentinel_settings", "DELETE FROM sentinel_settings WHERE rowid NOT IN (SELECT MAX(rowid) FROM sentinel_settings GROUP BY key)",
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sentinel_settings_key_unique ON sentinel_settings(key)"),
+        ]
+        for table, dedupe_sql, index_sql in migrations:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                db.execute(dedupe_sql)
+                db.execute(index_sql)
 
     def _domain_intel(self, domain: str) -> dict[str, Any]:
         domain = str(domain or '').strip().lower().rstrip('.')
@@ -843,6 +864,9 @@ class Store:
                 PRIMARY KEY(profile_id, device_id)
             )
         """)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='denylist'").fetchone():
+            db.execute("DELETE FROM denylist WHERE rowid NOT IN (SELECT MAX(rowid) FROM denylist GROUP BY profile_id,domain)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_denylist_profile_domain_unique ON denylist(profile_id,domain)")
 
     def upsert_account(self, account: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as db:

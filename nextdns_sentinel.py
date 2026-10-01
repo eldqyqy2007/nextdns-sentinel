@@ -649,7 +649,7 @@ DB_PATH = Path(os.getenv("NEXTDNS_SENTINEL_DB", "data/sentinel.db"))
 CONFIG_PATH = Path(os.getenv("NEXTDNS_SENTINEL_CONFIG", "config.json"))
 LOG_LEVEL = os.getenv("NEXTDNS_SENTINEL_LOG_LEVEL", "INFO").upper()
 HTTP_TIMEOUT = float(os.getenv("NEXTDNS_SENTINEL_HTTP_TIMEOUT", "10"))
-CHECK_INTERVAL = max(5, int(os.getenv("NEXTDNS_SENTINEL_INTERVAL", "15")))
+CHECK_INTERVAL = max(1, int(os.getenv("NEXTDNS_SENTINEL_INTERVAL", "5")))
 INITIAL_LOOKBACK = max(30, int(os.getenv("NEXTDNS_SENTINEL_INITIAL_LOOKBACK", "60")))
 POLL_OVERLAP_MS = max(0, int(os.getenv("NEXTDNS_SENTINEL_POLL_OVERLAP_MS", "5000")))
 ALERT_COOLDOWN = max(0, int(os.getenv("NEXTDNS_SENTINEL_ALERT_COOLDOWN", "300")))
@@ -2134,6 +2134,7 @@ class Sentinel:
     threads: list[threading.Thread] | None = None
     profile_events: dict[str, threading.Event] | None = None
     profile_threads: dict[str, threading.Thread] | None = None
+    notification_thread: threading.Thread | None = None
 
     def notify(
         self,
@@ -2219,6 +2220,38 @@ class Sentinel:
             "title": domain or reason or "Security event",
         })
         return alert_id
+
+    def dispatch_pending_notifications(self) -> None:
+        # Retries are independent from DNS polling so a recovered Telegram bot
+        # receives queued alerts immediately.
+        while self.stop_event is not None and not self.stop_event.is_set():
+            if not self.telegram_token or not self.telegram_chat_id:
+                self.stop_event.wait(1)
+                continue
+            try:
+                for account in self.store.accounts():
+                    if not account.get("active"):
+                        continue
+                    for alert in self.store.unnotified_alerts(account["profile_id"], 25):
+                        alert_id=int(alert.get("id") or 0) or None
+                        delivered=self.notify(
+                            account, alert["domain"], alert["reason"], alert["status"],
+                            alert["matched_domain"], alert["client_ip"], alert["event_timestamp"],
+                            alert.get("device_id",""), alert.get("device_name",""),
+                            alert.get("device_model",""), alert.get("protocol",""),
+                            bool(alert.get("encrypted")), alert_id,
+                        )
+                        if delivered:
+                            self.store.mark_alert_notified(alert["event_key"])
+                            if self.features and alert_id:
+                                self.features.delivery(alert_id,"telegram","sent")
+                        else:
+                            self.store.mark_notification_failed(alert["event_key"])
+                            if self.features and alert_id:
+                                self.features.delivery(alert_id,"telegram","failed")
+            except Exception:
+                logging.exception("Pending notification dispatcher failed")
+            self.stop_event.wait(1)
 
     def check_device_inactivity(self, account: dict[str, Any]) -> None:
         profile_id = account["profile_id"]
@@ -2381,38 +2414,7 @@ class Sentinel:
 
                 self.check_device_inactivity(account)
 
-                for alert in self.store.unnotified_alerts(profile_id):
-                    if self.store.was_recently_notified(
-                        profile_id, alert["domain"], ALERT_COOLDOWN
-                    ):
-                        self.store.mark_alert_suppressed(alert["event_key"])
-                        logging.info(
-                            "Suppressing delayed notification because %s was "
-                            "already notified during the cooldown.",
-                            alert["domain"],
-                        )
-                        continue
-
-                    alert_id=int(alert.get("id") or 0) or None
-                    delivered = self.notify(
-                        account,
-                        alert["domain"],
-                        alert["reason"],
-                        alert["status"],
-                        alert["matched_domain"],
-                        alert["client_ip"],
-                        alert["event_timestamp"],
-                        alert.get("device_id",""), alert.get("device_name",""),
-                        alert.get("device_model",""), alert.get("protocol",""),
-                        bool(alert.get("encrypted")), alert_id,
-                    )
-                    if delivered:
-                        self.store.mark_alert_notified(alert["event_key"])
-                        if self.features and alert_id: self.features.delivery(alert_id,"telegram","sent")
-                    else:
-                        self.store.mark_notification_failed(alert["event_key"])
-                        if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
-
+                # Pending notification retries are handled by the dedicated dispatcher.
                 self.store.set_poll_state(profile_id, checkpoint_ms)
                 if event:
                     event.wait(CHECK_INTERVAL)
@@ -2514,6 +2516,13 @@ class Sentinel:
             if self.start_profile(account["profile_id"]):
                 started += 1
         self._sync_thread_list()
+        if self.notification_thread is None or not self.notification_thread.is_alive():
+            self.notification_thread = threading.Thread(
+                target=self.dispatch_pending_notifications,
+                name="sentinel-notifications",
+                daemon=True,
+            )
+            self.notification_thread.start()
         logging.info("%s is monitoring %d active account(s).", APP_NAME, len(self.threads or []))
         return started
 
@@ -2530,6 +2539,10 @@ class Sentinel:
         self.profile_threads = {}
         self.profile_events = {}
         self.threads = []
+        notification_thread = self.notification_thread
+        self.notification_thread = None
+        if notification_thread and notification_thread.is_alive():
+            notification_thread.join(timeout=2)
         self.stop_event = None
         if self.features:
             self.features.heartbeat("stopped")

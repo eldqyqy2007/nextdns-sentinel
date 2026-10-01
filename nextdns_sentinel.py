@@ -3665,7 +3665,39 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');showActionToast('Refresh failed: '+e.message,'error');}
 }
-setupDashboardPages();showPage(localStorage.getItem('sentinel_active_page')||'overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);document.getElementById('alert-type-filter').addEventListener('change',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+function bindDashboardEvent(id,event,handler){
+ const el=document.getElementById(id);if(el)el.addEventListener(event,handler);
+}
+function dashboardBoot(){
+ try{
+  setupDashboardPages();
+  showPage(localStorage.getItem('sentinel_active_page')||'overview');
+  detectDevice();
+  window.addEventListener('resize',detectDevice);
+  bindDashboardEvent('alert-search','input',filterAlerts);
+  bindDashboardEvent('alert-type-filter','change',filterAlerts);
+  loadAlertLogSettings();
+  loadConfigChanges();
+  loadControlCenter();
+  refresh();
+  setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+ }catch(error){
+  console.error('Sentinel dashboard initialization failed:',error);
+  showActionToast('Dashboard initialization failed: '+(error?.message||error),'error');
+  const health=document.getElementById('health');
+  if(health){health.className='status error';health.textContent='Dashboard initialization failed: '+(error?.message||error);}
+ }
+}
+window.addEventListener('error',event=>{
+ const message=event?.error?.message||event?.message;
+ if(message)showActionToast('Dashboard error: '+message,'error');
+});
+window.addEventListener('unhandledrejection',event=>{
+ const message=event?.reason?.message||String(event?.reason||'Unknown error');
+ showActionToast('Dashboard error: '+message,'error');
+});
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dashboardBoot,{once:true});
+else dashboardBoot();
 function dashboardPagePanelIds(){
  const map={
   overview:['hero-dot','runtime','health','profile-health','event-timeline','summary-details'],
@@ -3682,10 +3714,19 @@ function dashboardPagePanelIds(){
 function setupDashboardPages(){
  const map=dashboardPagePanelIds();
  const pageByElement=new Map();
+ const topLevelPanel=(el)=>{
+  let panel=el?.closest('.panel');
+  if(!panel)return null;
+  while(panel.parentElement && !panel.parentElement.matches('.app-content main')){
+   panel=panel.parentElement.closest('.panel');
+   if(!panel)break;
+  }
+  return panel;
+ };
  for(const [page,ids] of Object.entries(map)){
   for(const id of ids){
-   const el=document.getElementById(id);const panel=el?.closest('.app-content main > .panel');
-   if(panel) pageByElement.set(panel,page);
+   const panel=topLevelPanel(document.getElementById(id));
+   if(panel)pageByElement.set(panel,page);
   }
  }
  document.querySelectorAll('.app-content main > .panel').forEach(panel=>{

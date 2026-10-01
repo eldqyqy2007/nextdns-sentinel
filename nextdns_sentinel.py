@@ -1307,6 +1307,18 @@ class Sentinel:
             return False
         return send_telegram(self.telegram_token, self.telegram_chat_id, "\n".join(lines))
 
+    def notify_report(self, title: str, lines: list[str], alert_id: int | None = None) -> bool:
+        if alert_id and self.features:
+            context = self.features.alert_context(alert_id)
+            severity = str(context.get("severity") or "medium").upper()
+            risk = context.get("risk_score", "—")
+            lines = [f"Severity: {severity} · Risk: {risk}/100", *lines]
+        message = "🛡️ NextDNS Sentinel\\n\\n" + title + "\\n" + "\\n".join(lines)
+        ok = send_telegram(self.telegram_token, self.telegram_chat_id, message) if self.telegram_token and self.telegram_chat_id else False
+        if self.features and alert_id:
+            self.features.delivery(alert_id, "telegram", "sent" if ok else "failed")
+        return ok
+
     def enrich_alert(self, event_key: str, account: dict[str, Any], domain: str, reason: str,
                      status: str, matched: str, client_ip: str, event_time: str,
                      device_id: str, device_name: str, device_model: str,
@@ -2088,7 +2100,67 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/analytics")
     def api_analytics() -> Any:
-        return jsonify(store.alert_analytics())
+        base=store.alert_analytics()
+        base["intelligence"]=features.analytics()
+        return jsonify(base)
+
+    @app.get("/api/incidents")
+    def api_incidents() -> Any:
+        return jsonify(features.incidents(request.args.get("status",""), int(request.args.get("limit","100"))))
+
+    @app.get("/api/incidents/<int:incident_id>")
+    def api_incident(incident_id:int) -> Any:
+        item=features.incident(incident_id)
+        return jsonify(item) if item else (jsonify({"error":"Incident not found."}),404)
+
+    @app.post("/api/incidents/<int:incident_id>/status")
+    def api_incident_status(incident_id:int) -> Any:
+        data=request_json(); status=str(data.get("status","")).lower()
+        if not features.set_incident_status(incident_id,status):
+            return jsonify({"error":"Invalid incident status or incident not found."}),400
+        features.audit("incident_status","incident",str(incident_id),details={"status":status})
+        return jsonify({"updated":True,"status":status})
+
+    @app.get("/api/audit")
+    def api_audit() -> Any:
+        return jsonify(features.audit_entries(int(request.args.get("limit","200"))))
+
+    @app.get("/api/delivery")
+    def api_delivery() -> Any:
+        return jsonify(features.delivery_history(int(request.args.get("limit","200"))))
+
+    @app.get("/api/bulk-history")
+    def api_bulk_history() -> Any:
+        return jsonify(features.bulk_history(int(request.args.get("limit","100"))))
+
+    @app.get("/api/domains")
+    def api_domains() -> Any:
+        return jsonify(features.domain_intelligence(int(request.args.get("limit","200"))))
+
+    @app.get("/api/search")
+    def api_search() -> Any:
+        return jsonify(features.search(request.args.get("q","").strip(), int(request.args.get("limit","100"))))
+
+    @app.get("/api/devices/<profile_id>/<path:device_id>")
+    def api_device_detail(profile_id:str,device_id:str) -> Any:
+        return jsonify(features.device_detail(profile_id,device_id))
+
+    @app.get("/api/export/json")
+    def api_export_json() -> Any:
+        return jsonify(features.export_json())
+
+    @app.get("/api/export/csv")
+    def api_export_csv() -> Any:
+        from flask import Response
+        return Response(features.export_csv(),mimetype="text/csv",
+                        headers={"Content-Disposition":"attachment; filename=nextdns-sentinel-alerts.csv"})
+
+    @app.get("/api/sentinel/health")
+    def api_sentinel_health() -> Any:
+        result=features.health()
+        result["runtime"]=sentinel.is_running()
+        result["telegram_configured"]=bool(sentinel.telegram_token and sentinel.telegram_chat_id)
+        return jsonify(result)
 
     @app.get("/api/runtime")
     def api_runtime() -> Any:
@@ -2160,6 +2232,13 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         try:
             client=NextDNSClient(account["api_key"]); client.add_denylist(profile_id,domain)
             current=client.denylist(profile_id); store.replace_denylist(profile_id,current)
+            key=hashlib.sha256(f"action:denylist_add:{profile_id}:{domain}:{utc_now()}".encode()).hexdigest()
+            store.add_alert(profile_id,account["name"],domain,domain,f"Denylist entry added by Sentinel dashboard","denylist_added","",utc_now(),key,"configuration_action",source="sentinel_dashboard")
+            alert_id=sentinel.enrich_alert(key,account,domain,"Denylist entry added by Sentinel dashboard","denylist_added",domain,"",utc_now(),"","","","",False)
+            delivered=sentinel.notify(account,domain,"Denylist entry added by Sentinel dashboard","denylist_added",domain,event_time=utc_now(),alert_id=alert_id)
+            if delivered: store.mark_alert_notified(key)
+            else: store.mark_notification_failed(key)
+            features.audit("denylist_add","profile",profile_id,profile_id,{"domain":domain})
             return jsonify({"saved":True,"domain":domain,"entries":current})
         except Exception as exc: return jsonify({"error":str(exc)}),400
 
@@ -2170,7 +2249,15 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         try:
             client=NextDNSClient(account["api_key"]); client.remove_denylist(profile_id,domain)
             current=client.denylist(profile_id); store.replace_denylist(profile_id,current)
-            return jsonify({"removed":True,"domain":normalize_domain(domain),"entries":current})
+            normalized=normalize_domain(domain)
+            key=hashlib.sha256(f"action:denylist_remove:{profile_id}:{normalized}:{utc_now()}".encode()).hexdigest()
+            store.add_alert(profile_id,account["name"],normalized,normalized,f"Denylist entry removed by Sentinel dashboard","denylist_removed","",utc_now(),key,"configuration_action",source="sentinel_dashboard")
+            alert_id=sentinel.enrich_alert(key,account,normalized,"Denylist entry removed by Sentinel dashboard","denylist_removed",normalized,"",utc_now(),"","","","",False)
+            delivered=sentinel.notify(account,normalized,"Denylist entry removed by Sentinel dashboard","denylist_removed",normalized,event_time=utc_now(),alert_id=alert_id)
+            if delivered: store.mark_alert_notified(key)
+            else: store.mark_notification_failed(key)
+            features.audit("denylist_remove","profile",profile_id,profile_id,{"domain":normalized})
+            return jsonify({"removed":True,"domain":normalized,"entries":current})
         except Exception as exc: return jsonify({"error":str(exc)}),400
 
     @app.post("/api/denylist/bulk")
@@ -2188,7 +2275,18 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 results.append({"profile_id":account["profile_id"],"profile_name":account["profile_name"],"status":"success","reason":"API operation completed."})
             except Exception as exc:
                 results.append({"profile_id":account["profile_id"],"profile_name":account["profile_name"],"status":"failed","reason":str(exc)})
-        return jsonify({"domain":domain,"action":action,"results":results,"successes":sum(r["status"]=="success" for r in results),"failures":sum(r["status"]=="failed" for r in results),"skipped":sum(r["status"]=="skipped" for r in results)})
+        successes=sum(r["status"]=="success" for r in results); failures=sum(r["status"]=="failed" for r in results); skipped=sum(r["status"]=="skipped" for r in results)
+        operation_id=features.record_bulk("denylist_"+action,domain,results)
+        features.audit("bulk_denylist","all_profiles",domain,details={"action":action,"operation_id":operation_id,"successes":successes,"failures":failures,"skipped":skipped})
+        if sentinel.telegram_token and sentinel.telegram_chat_id:
+            sentinel.notify_report("Bulk denylist action",[
+                f"Action: {action.upper()}",
+                f"Domain: {domain}",
+                f"Operation: #{operation_id}",
+                f"Profiles: {len(results)}",
+                f"Success: {successes} · Failed: {failures} · Skipped: {skipped}",
+            ])
+        return jsonify({"domain":domain,"action":action,"operation_id":operation_id,"results":results,"successes":successes,"failures":failures,"skipped":skipped})
 
     @app.post("/api/monitor/start")
     def api_monitor_start() -> Any:
@@ -2244,10 +2342,21 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not account: return jsonify({"error":"Account not found."}),404
         try:
             client=NextDNSClient(account["api_key"])
+            before=config_snapshot(client.profile(profile_id))
             path=f"/profiles/{profile_id}" if section=="profile" else f"/profiles/{profile_id}/{section}"
             result=client._patch(path,data)
-            live=client.profile(profile_id)
-            store.save_config_snapshot(profile_id,config_snapshot(live))
+            live=client.profile(profile_id); after=config_snapshot(live)
+            if before!=after:
+                change_type=config_change_summary(before,after)
+                change_id=store.add_config_change(profile_id,before,after,change_type)
+                key=hashlib.sha256(f"config_action:{profile_id}:{change_id}".encode()).hexdigest()
+                store.add_alert(profile_id,account["name"],"","",f"Configuration changed from Sentinel dashboard: {change_type}","config_changed","",utc_now(),key,"config_change",source="sentinel_dashboard")
+                alert_id=sentinel.enrich_alert(key,account,"",f"Configuration changed from Sentinel dashboard: {change_type}","config_changed","","",utc_now(),"","","","",False)
+                delivered=sentinel.notify(account,"",f"Configuration changed from Sentinel dashboard: {change_type}","config_changed","",event_time=utc_now(),alert_id=alert_id)
+                if delivered: store.mark_alert_notified(key)
+                else: store.mark_notification_failed(key)
+                features.audit("profile_config_patch","profile",profile_id,profile_id,{"section":section,"change_id":change_id})
+            store.save_config_snapshot(profile_id,after)
             return jsonify({"saved":True,"section":section,"response":result,"profile":live})
         except Exception as exc: return jsonify({"error":str(exc)}),400
 

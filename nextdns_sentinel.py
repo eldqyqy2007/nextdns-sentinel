@@ -527,8 +527,6 @@ class NextDNSClient:
 
         raise NextDNSError(f"NextDNS request failed: {last_error}")
 
-    def profiles(self) -> list[dict[str, Any]]:
-        return self._get("/profiles").get("data", [])
 
     def denylist(self, profile_id: str) -> list[str]:
         domains: list[str] = []

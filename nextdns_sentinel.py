@@ -116,7 +116,8 @@ class Store:
                     profile_id TEXT PRIMARY KEY,
                     last_poll_ms INTEGER NOT NULL DEFAULT 0,
                     last_success_at TEXT NOT NULL DEFAULT '',
-                    last_error TEXT NOT NULL DEFAULT ''
+                    last_error TEXT NOT NULL DEFAULT '',
+                    last_error_at TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
@@ -135,6 +136,9 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN event_timestamp TEXT NOT NULL DEFAULT ''")
         if "notification_status" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN notification_status TEXT NOT NULL DEFAULT 'pending'")
+        monitor_columns = {row[1] for row in db.execute("PRAGMA table_info(monitor_state)")}
+        if "last_error_at" not in monitor_columns:
+            db.execute("ALTER TABLE monitor_state ADD COLUMN last_error_at TEXT NOT NULL DEFAULT ''")
         if "notification_attempts" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN notification_attempts INTEGER NOT NULL DEFAULT 0")
         if "last_notification_attempt_at" not in columns:
@@ -337,17 +341,21 @@ class Store:
         with sqlite3.connect(self.path) as db:
             db.execute(
                 """
-                INSERT INTO monitor_state(profile_id,last_poll_ms,last_success_at,last_error)
-                VALUES(?,?,?,?)
+                INSERT INTO monitor_state(profile_id,last_poll_ms,last_success_at,last_error,last_error_at)
+                VALUES(?,?,?,?,?)
                 ON CONFLICT(profile_id) DO UPDATE SET
                     last_poll_ms=excluded.last_poll_ms,
                     last_success_at=CASE
                         WHEN excluded.last_error='' THEN excluded.last_success_at
                         ELSE monitor_state.last_success_at
                     END,
-                    last_error=excluded.last_error
+                    last_error=excluded.last_error,
+                    last_error_at=CASE
+                        WHEN excluded.last_error='' THEN monitor_state.last_error_at
+                        ELSE excluded.last_error_at
+                    END
                 """,
-                (profile_id, last_poll_ms, utc_now() if not error else "", error),
+                (profile_id, last_poll_ms, utc_now() if not error else "", error, utc_now() if error else ""),
             )
 
     def get_poll_ms(self, profile_id: str) -> int:
@@ -380,7 +388,7 @@ class Store:
                 SELECT last_error
                 FROM monitor_state
                 WHERE last_error<>''
-                ORDER BY last_error DESC
+                ORDER BY last_error_at DESC
                 LIMIT 1
                 """
             ).fetchone()

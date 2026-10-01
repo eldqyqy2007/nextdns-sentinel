@@ -1270,8 +1270,19 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 <button class="start" type="submit">Save Telegram</button>
 <button class="neutral" type="button" onclick="testTelegram()">Send Test</button>
 <button class="stop" type="button" onclick="disableTelegram()">Disable</button>
+<button class="neutral" type="button" onclick="editTelegram()">Edit Bot</button>
 </form>
 <div class="status" id="telegram-status">Checking...</div>
+<div id="telegram-editor" class="editor hidden">
+<strong>Edit Telegram Bot</strong>
+<form id="telegram-edit-form">
+<label>Bot token<input name="token" type="password" placeholder="Leave blank to keep the current token"></label>
+<label>Chat ID<input name="chat_id" placeholder="Telegram chat ID"></label>
+<button class="start" type="submit">Save Bot Changes</button>
+<button class="neutral" type="button" onclick="closeTelegramEditor()">Cancel</button>
+</form>
+<div class="status" id="telegram-edit-message"></div>
+</div>
 </div>
 
 <div class="grid" id="stats"></div>
@@ -1330,7 +1341,34 @@ document.getElementById('telegram-form').addEventListener('submit',async e=>{
  catch(err){setText('telegram-status',err.message,'error');}
 });
 async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
-async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});setText('telegram-status','Telegram disabled.','muted');}catch(e){setText('telegram-status',e.message,'error');}}
+async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});closeTelegramEditor();setText('telegram-status','Telegram disabled.','muted');}catch(e){setText('telegram-status',e.message,'error');}}
+async function editTelegram(){
+ try{
+  const d=await api('/api/settings/telegram');
+  const form=document.getElementById('telegram-edit-form');
+  form.elements.chat_id.value=d.chat_id||'';
+  form.elements.token.value='';
+  document.getElementById('telegram-editor').classList.remove('hidden');
+  setText('telegram-edit-message',d.configured?'Current Telegram bot settings loaded.':'Telegram is not configured.','muted');
+  document.getElementById('telegram-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
+ }catch(e){setText('telegram-status',e.message,'error');}
+}
+function closeTelegramEditor(){
+ document.getElementById('telegram-editor').classList.add('hidden');
+ document.getElementById('telegram-edit-form').reset();
+ setText('telegram-edit-message','','');
+}
+document.getElementById('telegram-edit-form').addEventListener('submit',async e=>{
+ e.preventDefault();
+ const d=Object.fromEntries(new FormData(e.target).entries());
+ try{
+  await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});
+  closeTelegramEditor();
+  setText('telegram-status','Telegram bot updated and encrypted locally.','ok');
+  refresh();
+ }catch(err){setText('telegram-edit-message',err.message,'error');}
+});
+
 let editingProfileId='';
 
 async function editProfile(id){
@@ -1673,6 +1711,16 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
             return jsonify({"configured": True})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/settings/telegram")
+    def api_telegram_get() -> Any:
+        token = store.get_secret("telegram_token")
+        chat_id = store.get_secret("telegram_chat_id")
+        return jsonify({
+            "configured": bool(token and chat_id),
+            "chat_id": chat_id,
+            "token_configured": bool(token),
+        })
 
     @app.delete("/api/settings/telegram")
     def api_telegram_delete() -> Any:

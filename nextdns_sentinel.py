@@ -3784,7 +3784,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             "rules": features.rules(),
             "maintenance": features.maintenance_active(),
             "safe_mode": store.setting("safe_mode","0")=="1",
-            "api_auth": bool(store.setting("api_auth_token","")),
+            "api_auth": bool(store.setting("api_auth_hash","")),
             "diagnostics": features.diagnostics(),
             "rate_limits": features.rate_limit_history(20),
         })

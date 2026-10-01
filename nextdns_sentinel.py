@@ -1998,12 +1998,13 @@ def validate_telegram_credentials(token: str, chat_id: str) -> dict[str, Any]:
     return {"bot": bot, "chat": chat}
 
 
-def send_telegram(
+def send_telegram_result(
     token: str, chat_id: str, message: str, retries: int = API_RETRIES
-) -> bool:
+) -> tuple[bool, str]:
     if not token or not chat_id:
-        return False
+        return False, "Telegram is not configured."
 
+    last_reason = "Telegram delivery failed."
     for attempt in range(retries + 1):
         try:
             response = requests.post(
@@ -2012,8 +2013,14 @@ def send_telegram(
                 timeout=HTTP_TIMEOUT,
             )
             if response.ok:
-                return True
+                return True, "Message delivered."
 
+            try:
+                payload = response.json()
+                api_reason = str(payload.get("description") or "").strip()
+            except ValueError:
+                api_reason = ""
+            last_reason = api_reason or f"Telegram HTTP {response.status_code}."
             if response.status_code == 429 or response.status_code >= 500:
                 retry_after = response.headers.get("Retry-After", "")
                 try:
@@ -2022,27 +2029,27 @@ def send_telegram(
                     retry_delay = 2 ** attempt
                 delay = min(retry_delay, 60.0)
                 if attempt < retries:
-                    logging.warning(
-                        "Telegram HTTP %s; retrying in %.1fs",
-                        response.status_code,
-                        delay,
-                    )
+                    logging.warning("Telegram HTTP %s; retrying in %.1fs: %s", response.status_code, delay, last_reason)
                     time.sleep(delay)
                     continue
-
-            logging.error("Telegram delivery failed: HTTP %s", response.status_code)
-            return False
+            logging.error("Telegram delivery failed: %s", last_reason)
+            return False, last_reason
         except requests.RequestException as exc:
+            last_reason = f"Telegram network error: {exc}"
             if attempt >= retries:
-                logging.exception("Telegram delivery failed")
-                return False
+                logging.exception("Telegram delivery failed: %s", exc)
+                return False, last_reason
             delay = min(2 ** attempt, 30)
-            logging.warning(
-                "Telegram network error; retrying in %ss: %s", delay, exc
-            )
+            logging.warning("Telegram network error; retrying in %ss: %s", delay, exc)
             time.sleep(delay)
 
-    return False
+    return False, last_reason
+
+
+def send_telegram(
+    token: str, chat_id: str, message: str, retries: int = API_RETRIES
+) -> bool:
+    return send_telegram_result(token, chat_id, message, retries)[0]
 
 
 @dataclass
@@ -2510,6 +2517,7 @@ DASHBOARD = """<!doctype html>
 <button class="neutral" type="button" onclick="editTelegram()">Edit Bot</button>
 </form>
 <div class="status" id="telegram-status">Checking...</div>
+<div class="mini-list" id="telegram-bot-card"><div class="muted">Loading Telegram bot identity...</div></div>
 <div id="telegram-editor" class="editor hidden">
 <strong>Edit Telegram Bot</strong>
 <form id="telegram-edit-form">
@@ -3073,6 +3081,7 @@ async function refresh(){
   try{
   const tg=await api('/api/settings/telegram');
   setText('telegram-status',tg.enabled?'Enabled · @'+(tg.bot_username||'bot')+' · '+(tg.chat_title||tg.chat_id):(tg.configured?'Disabled · Saved bot available to enable.':'Disabled · No Telegram bot configured.'),tg.enabled?'ok':'muted');
+  const botCard=document.getElementById('telegram-bot-card');if(botCard){botCard.replaceChildren();const item=document.createElement('div');item.className='mini-item';const label=document.createElement('strong');label.textContent=tg.configured?'Configured Telegram Bot':'No Telegram Bot';const detail=document.createElement('span');detail.textContent=tg.configured?('@'+(tg.bot_username||'unknown')+' · '+(tg.bot_name||'Unnamed')+' · '+(tg.chat_title||tg.chat_id||'chat')):'Add a bot token and chat ID, then use Send Test.';item.append(label,detail);botCard.append(item);}
  }catch(e){setText('telegram-status','Telegram status error: '+e.message,'error');}
   const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
   const cards=[
@@ -3883,14 +3892,14 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     def api_telegram_test() -> Any:
         if not sentinel.telegram_token or not sentinel.telegram_chat_id or store.setting("telegram_enabled","1")!="1":
             return jsonify({"error": "Telegram is disabled or not configured. Enable the bot first."}), 400
-        ok = send_telegram(
+        ok, reason = send_telegram_result(
             sentinel.telegram_token,
             sentinel.telegram_chat_id,
             "NextDNS Sentinel test notification.",
         )
         if not ok:
-            return jsonify({"error": "Telegram test notification failed."}), 502
-        return jsonify({"sent": True})
+            return jsonify({"error": reason}), 502
+        return jsonify({"sent": True, "message": reason})
 
     @app.get("/api/risk-history")
     def api_risk_history() -> Any:

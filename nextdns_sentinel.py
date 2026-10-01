@@ -1342,6 +1342,39 @@ class Sentinel:
         })
         return alert_id
 
+    def check_device_inactivity(self, account: dict[str, Any]) -> None:
+        profile_id = account["profile_id"]
+        for device in self.store.device_states():
+            if device["profile_id"] != profile_id or not device["last_seen_at"] or device.get("inactive_alerted_at"):
+                continue
+            try:
+                last_dt = datetime.fromisoformat(str(device["last_seen_at"]).replace("Z","+00:00"))
+                age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if age < DEVICE_INACTIVITY_SECONDS:
+                    continue
+                if not self.store.mark_device_inactive_alerted(profile_id,device["device_id"]):
+                    continue
+                key=hashlib.sha256(("inactive:"+profile_id+":"+device["device_id"]+":"+device["last_seen_at"]).encode()).hexdigest()
+                reason="No recent DNS activity detected; DNS may be inactive on this device."
+                self.store.add_alert(profile_id,account["name"],"","",reason,"device_inactive",
+                                     device.get("client_ip",""),device["last_seen_at"],key,
+                                     "device_inactive",device.get("device_id",""),
+                                     device.get("device_name",""),device.get("device_model",""),"")
+                alert_id=self.enrich_alert(key,account,"",reason,"device_inactive","",
+                                           device.get("client_ip",""),device["last_seen_at"],
+                                           device.get("device_id",""),device.get("device_name",""),
+                                           device.get("device_model",""),"",False)
+                delivered=self.notify(account,"",reason,"device_inactive","",
+                                     device.get("client_ip",""),device["last_seen_at"],
+                                     device.get("device_id",""),device.get("device_name",""),
+                                     device.get("device_model",""),"",False,alert_id)
+                if delivered:
+                    self.store.mark_alert_notified(key)
+                else:
+                    self.store.mark_notification_failed(key)
+            except (TypeError,ValueError):
+                continue
+
     def monitor_account(self, account: dict[str, Any]) -> None:
         client = NextDNSClient(account["api_key"])
         profile_id = account["profile_id"]
@@ -1411,27 +1444,6 @@ class Sentinel:
                     matched = find_matching_domain(domain, denylist) or matched_domain(log)
                     reason = event_reason(log) or "Custom denylist match"
 
-                    for device in self.store.device_states():
-                        if device["profile_id"] != profile_id or not device["last_seen_at"] or device.get("inactive_alerted_at"):
-                            continue
-                        try:
-                            last_dt=datetime.fromisoformat(str(device["last_seen_at"]).replace("Z","+00:00"))
-                            age=(datetime.now(timezone.utc)-last_dt).total_seconds()
-                            if age >= DEVICE_INACTIVITY_SECONDS and self.store.mark_device_inactive_alerted(profile_id,device["device_id"]):
-                                key=hashlib.sha256(("inactive:"+profile_id+":"+device["device_id"]+":"+device["last_seen_at"]).encode()).hexdigest()
-                                reason="No recent DNS activity detected; DNS may be inactive on this device."
-                                self.store.add_alert(profile_id,account["name"],"","",reason,"device_inactive",device.get("client_ip",""),device["last_seen_at"],key,"device_inactive",device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"")
-                                alert_id=self.enrich_alert(key,account,"",reason,"device_inactive","",device.get("client_ip",""),device["last_seen_at"],device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"",False)
-                                delivered=self.notify(account,"",reason,"device_inactive","",device.get("client_ip",""),device["last_seen_at"],device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"",False,alert_id)
-                                if delivered:
-                                    self.store.mark_alert_notified(key)
-                                    if self.features and alert_id: self.features.delivery(alert_id,"telegram","sent")
-                                else:
-                                    self.store.mark_notification_failed(key)
-                                    if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
-                        except (TypeError,ValueError):
-                            continue
-
                     recently_notified = self.store.was_recently_notified(
                         profile_id, domain, ALERT_COOLDOWN
                     )
@@ -1471,6 +1483,8 @@ class Sentinel:
                                 "Telegram notification suppressed by cooldown for %s",
                                 domain,
                             )
+
+                self.check_device_inactivity(account)
 
                 for alert in self.store.unnotified_alerts(profile_id):
                     if self.store.was_recently_notified(

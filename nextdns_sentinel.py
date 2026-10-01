@@ -364,7 +364,25 @@ class NextDNSClient:
                         f"NextDNS API returned HTTP {response.status_code} for {path}: {detail}"
                     )
 
-                return response.json()
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise NextDNSError(
+                        f"NextDNS API returned invalid JSON for {path}."
+                    ) from exc
+
+                api_errors = data.get("errors") if isinstance(data, dict) else None
+                if api_errors:
+                    detail = json.dumps(api_errors, ensure_ascii=False, default=str)[:500]
+                    raise NextDNSError(
+                        f"NextDNS API returned application errors for {path}: {detail}"
+                    )
+
+                if not isinstance(data, dict):
+                    raise NextDNSError(
+                        f"NextDNS API returned an unexpected response for {path}."
+                    )
+                return data
             except requests.RequestException as exc:
                 last_error = exc
                 if attempt >= API_RETRIES:
@@ -555,16 +573,24 @@ class Sentinel:
         client_ip: str = "",
     ) -> bool:
         message = (
-            "NextDNS Sentinel alert\n\n"
-            f"Account: {account['name']}\n"
-            f"Domain: {domain}\n"
-            f"Matched: {matched or 'n/a'}\n"
-            f"Status: {status or 'n/a'}\n"
-            f"Reason: {reason or 'Custom denylist match'}\n"
+            "NextDNS Sentinel alert
+
+"
+            f"Account: {account['name']}
+"
+            f"Domain: {domain}
+"
+            f"Matched: {matched or 'n/a'}
+"
+            f"Status: {status or 'n/a'}
+"
+            f"Reason: {reason or 'Custom denylist match'}
+"
             f"Time: {utc_now()}"
         )
         if client_ip:
-            message += f"\nClient IP: {client_ip}"
+            message += f"
+Client IP: {client_ip}"
         if not self.telegram_token or not self.telegram_chat_id:
             return False
         return send_telegram(self.telegram_token, self.telegram_chat_id, message)

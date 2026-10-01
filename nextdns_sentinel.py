@@ -1300,13 +1300,13 @@ DASHBOARD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NextDNS Sentinel</title>
-<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 15% 0%,#14243a 0,#080b12 36%);color:#e8edf7;margin:0;padding:24px;line-height:1.45}main{max-width:1250px;margin:auto}h1{margin:0;font-size:32px;letter-spacing:-.6px}h2{margin:0 0 12px;font-size:18px}h3{margin:0 0 10px}.muted{color:#8c98aa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.card,.panel{background:linear-gradient(145deg,rgba(16,22,33,.97),rgba(11,16,25,.97));border:1px solid #263248;border-radius:16px;padding:17px;margin-bottom:14px;box-shadow:0 12px 35px rgba(0,0,0,.16)}.value{font-size:29px;font-weight:750;margin-top:3px}.card .muted{text-transform:capitalize;font-size:12px;letter-spacing:.4px}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #263248}.ok{color:#9af0bb}.error{color:#ffb4b4}.neutral-text{color:#b8c4d8}button{border:1px solid transparent;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer;margin:3px;transition:transform .15s,filter .15s}button:hover{filter:brightness(1.08);transform:translateY(-1px)}.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}input,select{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;margin:5px 0 10px}label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}th{color:#9eabc0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}tbody tr:hover{background:#141d2a}code{color:#9ed0ff}.hidden{display:none}.account{padding:12px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}.hero{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:22px 24px;margin-bottom:14px}.hero-copy{min-width:0}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:#7f91aa;font-weight:800}.hero-badge{border:1px solid #2d405c;background:#0c1420;border-radius:12px;padding:10px 13px;white-space:nowrap}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:#65758d}.dot.ok{background:#35c76f}.analytics{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.chart{height:230px;display:flex;align-items:flex-end;gap:6px;padding:18px 8px 28px;border-top:1px solid #202a3a}.bar-wrap{height:100%;flex:1;display:flex;align-items:flex-end;justify-content:center;position:relative;min-width:4px}.bar{width:100%;max-width:22px;min-height:3px;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,#55d98a,#2e9e68);transition:height .3s}.bar-label{position:absolute;bottom:-24px;font-size:10px;color:#75839a;white-space:nowrap}.bar-value{position:absolute;top:-18px;font-size:10px;color:#aebbd0}.mini-list{display:grid;gap:8px}.mini-item{display:flex;justify-content:space-between;gap:10px;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.progress{height:5px;background:#202a3a;border-radius:99px;overflow:hidden;margin-top:5px}.progress>span{display:block;height:100%;background:#55d98a}.section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.pill{font-size:11px;padding:4px 8px;border-radius:99px;background:#172235;color:#aebbd0}@media(max-width:800px){body{padding:12px}.analytics{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.hero-badge{width:100%}}</style>
+<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 15% 0%,#14243a 0,#080b12 36%);color:#e8edf7;margin:0;padding:24px;line-height:1.45}main{max-width:1250px;margin:auto}h1{margin:0;font-size:32px;letter-spacing:-.6px}h2{margin:0 0 12px;font-size:18px}h3{margin:0 0 10px}.muted{color:#8c98aa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.card,.panel{background:linear-gradient(145deg,rgba(16,22,33,.97),rgba(11,16,25,.97));border:1px solid #263248;border-radius:16px;padding:17px;margin-bottom:14px;box-shadow:0 12px 35px rgba(0,0,0,.16)}.value{font-size:29px;font-weight:750;margin-top:3px}.card .muted{text-transform:capitalize;font-size:12px;letter-spacing:.4px}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #263248}.ok{color:#9af0bb}.error{color:#ffb4b4}.neutral-text{color:#b8c4d8}button{border:1px solid transparent;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer;margin:3px;transition:transform .15s,filter .15s}button:hover{filter:brightness(1.08);transform:translateY(-1px)}.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}input,select{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;margin:5px 0 10px}label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}th{color:#9eabc0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}tbody tr:hover{background:#141d2a}code{color:#9ed0ff}.hidden{display:none}.account{padding:12px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}.hero{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:22px 24px;margin-bottom:14px}.hero-copy{min-width:0}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:#7f91aa;font-weight:800}.hero-badge{border:1px solid #2d405c;background:#0c1420;border-radius:12px;padding:10px 13px;white-space:nowrap}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:#65758d}.dot.ok{background:#35c76f}.analytics{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.chart{height:230px;display:flex;align-items:flex-end;gap:6px;padding:18px 8px 28px;border-top:1px solid #202a3a}.bar-wrap{height:100%;flex:1;display:flex;align-items:flex-end;justify-content:center;position:relative;min-width:4px}.bar{width:100%;max-width:22px;min-height:3px;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,#55d98a,#2e9e68);transition:height .3s}.bar-label{position:absolute;bottom:-24px;font-size:10px;color:#75839a;white-space:nowrap}.bar-value{position:absolute;top:-18px;font-size:10px;color:#aebbd0}.mini-list{display:grid;gap:8px}.mini-item{display:flex;justify-content:space-between;gap:10px;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.progress{height:5px;background:#202a3a;border-radius:99px;overflow:hidden;margin-top:5px}.progress>span{display:block;height:100%;background:#55d98a}.section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.pill{font-size:11px;padding:4px 8px;border-radius:99px;background:#172235;color:#aebbd0}@media(max-width:800px){body{padding:12px}.analytics{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.hero-badge{width:100%}}.device-badge{font-size:11px;padding:5px 9px;border:1px solid #2d405c;border-radius:99px;background:#101a28;color:#b8c4d8}.health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.health-card{padding:12px;background:#0b1019;border:1px solid #202a3a;border-radius:10px}.health-card .name{font-weight:750}.health-card .line{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-top:5px}.timeline{display:grid;gap:8px}.timeline-item{display:grid;grid-template-columns:8px 1fr auto;gap:10px;align-items:center;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.timeline-dot{width:8px;height:8px;border-radius:50%;background:#55d98a}.timeline-dot.warn{background:#efc95f}.timeline-dot.error{background:#ef6b73}.table-wrap{overflow-x:auto;border-radius:14px}body.device-android{padding:12px}body.device-android main{max-width:100%}body.device-android h1{font-size:26px}body.device-android .card{padding:14px}body.device-android button{min-height:42px}body.device-android input,body.device-android select{min-height:44px}body.device-windows{padding:28px}@media(max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.value{font-size:23px}.card{padding:13px}.chart{gap:2px;height:200px}.bar{max-width:12px}.bar-label{font-size:8px;transform:rotate(-35deg);transform-origin:top left}.section-head{align-items:flex-start;flex-direction:column}.hero-badge{white-space:normal}.timeline-item{grid-template-columns:8px minmax(0,1fr);}.timeline-item>strong{grid-column:2}}</style>
 </head>
 <body>
 <main>
 <div class="panel hero">
 <div class="hero-copy"><div class="eyebrow">Security Operations Console</div><h1>NextDNS Sentinel</h1><div class="muted">Local monitoring, alerting and profile control</div></div>
-<div class="hero-badge"><span id="hero-dot" class="dot"></span><span id="hero-status">Checking monitor</span></div>
+<div class="hero-badge"><span id="hero-dot" class="dot"></span><span id="hero-status">Checking monitor</span><div id="device-info" class="device-badge" style="margin-top:7px">Detecting device…</div></div>
 </div>
 
 <div class="panel">
@@ -1314,6 +1314,16 @@ DASHBOARD = """<!doctype html>
 <button class="start" onclick="controlMonitor('start')">Start Monitoring</button>
 <button class="stop" onclick="controlMonitor('stop')">Stop Monitoring</button>
 <div class="status" id="health">Loading health...</div>
+</div>
+
+<div class="panel">
+<div class="section-head"><div><h2>Profile Health</h2><div class="muted">Live monitoring status for every configured profile</div></div><span id="health-count" class="pill">0 profiles</span></div>
+<div id="profile-health" class="health-grid"><div class="muted">Loading...</div></div>
+</div>
+
+<div class="panel">
+<div class="section-head"><div><h2>Event Timeline</h2><div class="muted">Latest monitor and alert activity</div></div><span id="timeline-count" class="pill">0 events</span></div>
+<div id="event-timeline" class="timeline"><div class="muted">Loading...</div></div>
 </div>
 
 <div class="panel">
@@ -1390,11 +1400,14 @@ DASHBOARD = """<!doctype html>
 <div class="status" id="alert-log-status">Checking...</div>
 </div>
 
-<h2>Recent Alerts</h2>
-<table>
+<div class="panel">
+<div class="section-head"><div><h2>Recent Alerts</h2><div class="muted">Search and inspect the latest security events</div></div><span id="alerts-count" class="pill">0 shown</span></div>
+<input id="alert-search" type="search" placeholder="Search domain, account, reason, status…" autocomplete="off">
+<div class="table-wrap"><table>
 <thead><tr><th>Event Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th></tr></thead>
 <tbody id="alerts"></tbody>
-</table>
+</table></div>
+</div>
 </main>
 <script>
 function formatDateTime(value){
@@ -1429,6 +1442,67 @@ function renderAnalytics(data){
  }
 }
 
+function detectDevice(){
+ const ua=navigator.userAgent||'';
+ const platform=navigator.userAgentData?.platform||navigator.platform||'';
+ let os='Desktop';
+ if(/Android/i.test(ua))os='Android';
+ else if(/Windows/i.test(ua)||/Win/i.test(platform))os='Windows';
+ else if(/iPhone|iPad|iPod/i.test(ua))os='iOS';
+ else if(/Mac/i.test(platform)||/Mac OS/i.test(ua))os='macOS';
+ else if(/Linux/i.test(platform)||/Linux/i.test(ua))os='Linux';
+ const mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+ const device=mobile?'Mobile':('ontouchstart' in window&&innerWidth<900?'Tablet':'Desktop');
+ document.body.classList.add('device-'+os.toLowerCase());
+ const el=document.getElementById('device-info');
+ if(el)el.textContent=os+' · '+device+' · '+innerWidth+'×'+innerHeight;
+}
+function renderProfileHealth(items){
+ const box=document.getElementById('profile-health');box.replaceChildren();
+ setText('health-count',(items||[]).length+' profiles','');
+ if(!items?.length){box.textContent='No monitored profiles configured.';return;}
+ for(const item of items){
+  const card=document.createElement('div');card.className='health-card';
+  const name=document.createElement('div');name.className='name';name.textContent=item.name||item.profile_id;
+  const status=document.createElement('div');status.className='line';
+  const label=document.createElement('span');label.textContent=item.active?'Monitoring enabled':'Disabled';
+  const value=document.createElement('strong');value.className=item.last_error?'error':(item.active?'ok':'muted');value.textContent=item.last_error?'Error':(item.active?'Healthy':'Idle');
+  status.append(label,value);
+  const poll=document.createElement('div');poll.className='line';poll.innerHTML='<span>Last success</span><span></span>';poll.lastChild.textContent=formatDateTime(item.last_success_at);
+  const err=document.createElement('div');err.className='line';err.innerHTML='<span>Last error</span><span></span>';err.lastChild.textContent=item.last_error?formatDateTime(item.last_error_at):'None';
+  card.append(name,status,poll,err);box.append(card);
+ }
+}
+function renderTimeline(health,alerts){
+ const box=document.getElementById('event-timeline');box.replaceChildren();
+ const events=[];
+ for(const item of health||[]){
+  if(item.last_success_at)events.push({time:item.last_success_at,title:(item.name||item.profile_id)+' poll succeeded',detail:'Monitoring checkpoint',kind:'ok'});
+  if(item.last_error_at&&item.last_error)events.push({time:item.last_error_at,title:(item.name||item.profile_id)+' monitor error',detail:item.last_error,kind:'error'});
+ }
+ for(const alert of (alerts||[]).slice(0,8)){
+  if(alert.event_timestamp)events.push({time:alert.event_timestamp,title:alert.domain||'Alert',detail:(alert.reason||'Security event')+' · '+(alert.status||'unknown'),kind:'warn'});
+ }
+ events.sort((a,b)=>new Date(b.time)-new Date(a.time));
+ setText('timeline-count',events.length+' events','');
+ if(!events.length){box.textContent='No timeline events available yet.';return;}
+ for(const event of events.slice(0,12)){
+  const row=document.createElement('div');row.className='timeline-item';
+  const dot=document.createElement('span');dot.className='timeline-dot '+event.kind;
+  const middle=document.createElement('div');const title=document.createElement('strong');title.textContent=event.title;const detail=document.createElement('div');detail.className='muted';detail.textContent=event.detail;middle.append(title,detail);
+  const time=document.createElement('span');time.className='muted';time.textContent=formatDateTime(event.time);time.title=event.time;
+  row.append(dot,middle,time);box.append(row);
+ }
+}
+function filterAlerts(){
+ const q=(document.getElementById('alert-search').value||'').toLowerCase().trim();
+ let shown=0;
+ document.querySelectorAll('#alerts tr').forEach(row=>{
+  const match=!q||row.textContent.toLowerCase().includes(q);
+  row.style.display=match?'':'none';if(match)shown++;
+ });
+ setText('alerts-count',shown+' shown','');
+}
 function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
 async function api(path,options={}){
   try{
@@ -1590,6 +1664,7 @@ async function refresh(){
   const analytics=await api('/api/analytics');renderAnalytics(analytics);
   const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
   const heroDot=document.getElementById('hero-dot');heroDot.className='dot '+(s.last_error?'':'ok');setText('hero-status',s.last_error?'Attention required':'Monitoring healthy',s.last_error?'error':'ok');
+  const healthData=await api('/api/health');renderProfileHealth(healthData);
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
   for(const a of accounts){const row=document.createElement('div');row.className='account';
@@ -1600,10 +1675,12 @@ async function refresh(){
    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);row.append(del);box.append(row);
   }
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
+  renderTimeline(healthData,alerts);
   for(const x of alerts){const tr=document.createElement('tr');for(const k of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){const td=document.createElement('td');if(k==='event_timestamp'){formatTimestampCell(td,x[k]);}else{td.textContent=x[k]??'';}tr.append(td);}body.append(tr);}
+  filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
-loadAlertLogSettings();refresh();setInterval(refresh,5000);
+detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();refresh();setInterval(refresh,5000);
 </script>
 </body>
 </html>"""

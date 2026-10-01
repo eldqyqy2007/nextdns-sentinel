@@ -510,21 +510,28 @@ def normalize_domain(domain: str) -> str:
     return domain.strip().lower().rstrip(".")
 
 
-def domain_matches(domain: str, denylist: set[str]) -> bool:
+def find_matching_domain(domain: str, denylist: set[str]) -> str:
     domain = normalize_domain(domain)
-    normalized = {normalize_domain(entry) for entry in denylist}
-    if domain in normalized:
-        return True
+    if not domain:
+        return ""
+
+    if domain in denylist:
+        return domain
 
     labels = domain.split(".")
     for i in range(1, len(labels)):
-        if ".".join(labels[i:]) in normalized:
-            return True
+        parent = ".".join(labels[i:])
+        if parent in denylist:
+            return parent
 
-    for entry in normalized:
+    for entry in denylist:
         if entry.startswith("*.") and domain.endswith(entry[1:]):
-            return True
-    return False
+            return entry
+    return ""
+
+
+def domain_matches(domain: str, denylist: set[str]) -> bool:
+    return bool(find_matching_domain(domain, denylist))
 
 
 def event_domain(log: dict[str, Any]) -> str:
@@ -709,7 +716,7 @@ Client IP: {client_ip}"
                         continue
 
                     key = event_key(profile_id, log)
-                    matched = matched_domain(log)
+                    matched = find_matching_domain(domain, denylist) or matched_domain(log)
                     status = event_status(log)
                     reason = event_reason(log) or "Custom denylist match"
                     client_ip = event_client_ip(log)

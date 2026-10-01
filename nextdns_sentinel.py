@@ -151,6 +151,11 @@ class Store:
                     last_error TEXT NOT NULL DEFAULT '',
                     last_error_at TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
             self._migrate_alert_columns(db)
@@ -199,6 +204,60 @@ class Store:
                     account.get("added_at", utc_now()),
                 ),
             )
+
+    def set_secret(self, key: str, value: str) -> None:
+        encrypted = self.cipher.encrypt(value.encode()).decode()
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, encrypted),
+            )
+
+    def get_secret(self, key: str) -> str:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if not row:
+            return ""
+        try:
+            return self.cipher.decrypt(row[0].encode()).decode()
+        except InvalidToken as exc:
+            raise RuntimeError(
+                "Unable to decrypt stored settings. Verify the NextDNS Sentinel secret key."
+            ) from exc
+
+    def delete_secret(self, key: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM settings WHERE key=?", (key,))
+
+    def set_account_active(self, profile_id: str, active: bool) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE accounts SET active=? WHERE profile_id=?",
+                (int(active), profile_id),
+            )
+
+    def delete_account(self, profile_id: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM accounts WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM denylist WHERE profile_id=?", (profile_id,))
+            db.execute("DELETE FROM monitor_state WHERE profile_id=?", (profile_id,))
+
+    def account_exists(self, profile_id: str) -> bool:
+        with sqlite3.connect(self.path) as db:
+            return db.execute(
+                "SELECT 1 FROM accounts WHERE profile_id=?", (profile_id,)
+            ).fetchone() is not None
+
+    def denylist_entries(self, profile_id: str) -> list[str]:
+        with sqlite3.connect(self.path) as db:
+            return [
+                row[0]
+                for row in db.execute(
+                    "SELECT domain FROM denylist WHERE profile_id=? ORDER BY domain",
+                    (profile_id,),
+                )
+            ]
 
     def accounts(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -738,6 +797,46 @@ def event_key(profile_id: str, log: dict[str, Any]) -> str:
     return hashlib.sha256(f"{profile_id}:{raw}".encode()).hexdigest()
 
 
+def validate_telegram_credentials(token: str, chat_id: str) -> None:
+    if not token or not chat_id:
+        raise RuntimeError("Telegram bot token and chat ID are required.")
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{token}/getMe",
+            timeout=HTTP_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Unable to reach Telegram: {exc}") from exc
+    if not response.ok:
+        raise RuntimeError(
+            f"Telegram token validation failed (HTTP {response.status_code})."
+        )
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Telegram returned invalid JSON.") from exc
+    if not data.get("ok"):
+        raise RuntimeError("Telegram token validation failed.")
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{token}/getChat",
+            params={"chat_id": chat_id},
+            timeout=HTTP_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Unable to validate Telegram chat: {exc}") from exc
+    if not response.ok:
+        raise RuntimeError(
+            f"Telegram chat validation failed (HTTP {response.status_code})."
+        )
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Telegram returned invalid JSON.") from exc
+    if not data.get("ok"):
+        raise RuntimeError("Telegram chat ID could not be validated.")
+
+
 def send_telegram(
     token: str, chat_id: str, message: str, retries: int = API_RETRIES
 ) -> bool:
@@ -1019,141 +1118,122 @@ DASHBOARD = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NextDNS Sentinel</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#080b12;color:#e8edf7;margin:0;padding:20px}
-main{max-width:1100px;margin:auto}
-h1{margin-bottom:4px}.muted{color:#8c98aa}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0}
-.card,.panel{background:#101621;border:1px solid #202a3a;border-radius:14px;padding:18px}
-.value{font-size:28px;font-weight:700}
-button{border:0;border-radius:9px;padding:10px 15px;font-weight:700;cursor:pointer;margin:4px}
-.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}
-input{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:8px;padding:11px;margin:6px 0 12px}
-label{display:block;font-size:14px;color:#aeb8c8}
-.status{margin:12px 0;padding:11px 14px;border-radius:10px;background:#101621;border:1px solid #202a3a}
-.error{color:#ffb4b4}.ok{color:#9af0bb}
+body{font-family:system-ui,sans-serif;background:#080b12;color:#e8edf7;margin:0;padding:18px}
+main{max-width:1150px;margin:auto}h1{margin:0 0 4px}.muted{color:#8c98aa}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}
+.card,.panel{background:#101621;border:1px solid #202a3a;border-radius:14px;padding:16px;margin-bottom:14px}
+.value{font-size:27px;font-weight:700}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #202a3a}
+.ok{color:#9af0bb}.error{color:#ffb4b4}
+button{border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer;margin:3px}
+.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}
+input{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:8px;padding:10px;margin:5px 0 10px}
+label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}
 table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}
-th,td{text-align:left;padding:11px;border-bottom:1px solid #202a3a;font-size:13px}
-code{color:#9ed0ff}
-.hidden{display:none}
+th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}code{color:#9ed0ff}
+.hidden{display:none}.account{padding:10px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 </style>
 </head>
 <body>
 <main>
 <h1>NextDNS Sentinel</h1>
-<p class="muted">Local monitoring and setup console</p>
+<p class="muted">Local monitoring and control console</p>
 
-<div class="panel" id="setup">
-<h2>First-time setup</h2>
-<p class="muted">Add a NextDNS profile once. The API key is encrypted and stored locally.</p>
-<form id="setup-form">
-<label>Profile ID<input name="profile_id" required placeholder="e.g. abc123"></label>
-<label>Profile name<input name="profile_name" placeholder="My NextDNS Profile"></label>
-<label>Display name<input name="name" required placeholder="Primary Profile"></label>
-<label>NextDNS API key<input name="api_key" type="password" required placeholder="Paste API key"></label>
-<button class="start" type="submit">Save profile</button>
-</form>
-<div class="status" id="setup-message"></div>
+<div class="panel">
+<div class="row"><strong>Monitor:</strong><span id="runtime" class="muted">Checking...</span></div>
+<button class="start" onclick="controlMonitor('start')">Start Monitoring</button>
+<button class="stop" onclick="controlMonitor('stop')">Stop Monitoring</button>
+<div class="status" id="health">Loading health...</div>
 </div>
 
 <div class="panel">
-<strong>Monitor</strong>
-<span id="runtime" class="muted">Checking status...</span>
-<div>
-<button class="start" onclick="controlMonitor('start')">Start Monitoring</button>
-<button class="stop" onclick="controlMonitor('stop')">Stop Monitoring</button>
+<h2>NextDNS Profiles</h2>
+<form id="account-form">
+<label>Profile ID<input name="profile_id" required placeholder="NextDNS profile ID"></label>
+<label>Profile name<input name="profile_name" placeholder="Optional profile name"></label>
+<label>Display name<input name="name" required placeholder="Primary Profile"></label>
+<label>API key<input name="api_key" type="password" required placeholder="NextDNS API key"></label>
+<button class="start" type="submit">Add / Update Profile</button>
+</form>
+<div class="status" id="account-message"></div>
+<div id="accounts">Loading profiles...</div>
 </div>
-<div class="status" id="health">Loading health...</div>
+
+<div class="panel">
+<h2>Telegram Alerts</h2>
+<form id="telegram-form">
+<label>Bot token<input name="token" type="password" placeholder="123456:ABC..."></label>
+<label>Chat ID<input name="chat_id" placeholder="Telegram chat ID"></label>
+<button class="start" type="submit">Save Telegram</button>
+<button class="neutral" type="button" onclick="testTelegram()">Send Test</button>
+<button class="stop" type="button" onclick="disableTelegram()">Disable</button>
+</form>
+<div class="status" id="telegram-status">Checking...</div>
 </div>
 
 <div class="grid" id="stats"></div>
 
 <div class="panel">
-<h2>Configured profiles</h2>
-<div id="accounts-health" class="muted">Loading...</div>
+<h2>Local Denylist Cache</h2>
+<p class="muted">This list is synchronized automatically from each monitored NextDNS profile.</p>
+<div id="denylist">Select a profile to view its cached entries.</div>
 </div>
 
-<h2>Recent alerts</h2>
+<h2>Recent Alerts</h2>
 <table>
-<thead><tr>
-<th>Event Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th>
-</tr></thead>
+<thead><tr><th>Event Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th></tr></thead>
 <tbody id="alerts"></tbody>
 </table>
 </main>
 <script>
-function setText(id,text,cls=''){const el=document.getElementById(id);el.textContent=text;el.className=cls;}
+function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
 async function api(path,options={}){
-  const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
-  const data=await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data.error||'HTTP '+r.status);
-  return data;
+ const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+ const d=await r.json().catch(()=>({})); if(!r.ok)throw new Error(d.error||'HTTP '+r.status); return d;
 }
-async function controlMonitor(action){
-  try{
-    const data=await api('/api/monitor/'+action,{method:'POST'});
-    setText('runtime',data.running?'Running':'Stopped',data.running?'ok':'muted');
-    refresh();
-  }catch(e){setText('runtime',e.message,'error');}
-}
-document.getElementById('setup-form').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const data=Object.fromEntries(new FormData(e.target).entries());
-  try{
-    await api('/api/setup/account',{method:'POST',body:JSON.stringify(data)});
-    setText('setup-message','Profile saved. You can start monitoring now.','ok');
-    e.target.reset();
-    refresh();
-  }catch(err){setText('setup-message',err.message,'error');}
+async function controlMonitor(action){try{const d=await api('/api/monitor/'+action,{method:'POST'});setText('runtime',d.running?'Running':'Stopped',d.running?'ok':'muted');refresh();}catch(e){setText('runtime',e.message,'error');}}
+document.getElementById('account-form').addEventListener('submit',async e=>{
+ e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());
+ try{await api('/api/setup/account',{method:'POST',body:JSON.stringify(d)});setText('account-message','Profile saved and monitoring started.','ok');e.target.reset();refresh();}
+ catch(err){setText('account-message',err.message,'error');}
 });
-async function refresh(){
-  try{
-    const runtime=await api('/api/runtime');
-    setText('runtime',runtime.running?'Running':'Stopped',runtime.running?'ok':'muted');
-
-    const s=await api('/api/stats');
-    const stats=document.querySelector('#stats'); stats.replaceChildren();
-    for(const [k,v] of Object.entries(s)){
-      if(k==='last_success_at'||k==='last_error'||k==='last_error_at') continue;
-      const card=document.createElement('div'); card.className='card';
-      const label=document.createElement('div'); label.className='muted'; label.textContent=k.replaceAll('_',' ');
-      const value=document.createElement('div'); value.className='value'; value.textContent=v;
-      card.append(label,value); stats.append(card);
-    }
-    const health=document.querySelector('#health');
-    health.className='status '+(s.last_error?'error':'ok');
-    health.textContent=s.last_error
-      ? 'Monitor error: '+s.last_error+' · '+(s.last_error_at||'')
-      : 'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
-
-    const accounts=await api('/api/health');
-    const box=document.querySelector('#accounts-health'); box.replaceChildren();
-    document.querySelector('#setup').classList.toggle('hidden',accounts.length>0);
-    if(!accounts.length) box.textContent='No profiles configured yet.';
-    for(const a of accounts){
-      const row=document.createElement('div');
-      row.textContent=a.name+' · '+(a.active?'Active':'Inactive')+' · '+(
-        a.last_error?'Error: '+a.last_error:'Last success: '+(a.last_success_at||'not available')
-      );
-      if(a.last_error) row.className='error';
-      box.append(row);
-    }
-
-    const alerts=await api('/api/alerts');
-    const body=document.querySelector('#alerts'); body.replaceChildren();
-    for(const x of alerts){
-      const tr=document.createElement('tr');
-      for(const key of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){
-        const td=document.createElement('td'); td.textContent=x[key]??''; tr.append(td);
-      }
-      body.append(tr);
-    }
-  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
+document.getElementById('telegram-form').addEventListener('submit',async e=>{
+ e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());
+ try{await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});setText('telegram-status','Telegram configured and encrypted locally.','ok');e.target.reset();refresh();}
+ catch(err){setText('telegram-status',err.message,'error');}
+});
+async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
+async function disableTelegram(){try{await api('/api/settings/telegram',{method:'DELETE'});setText('telegram-status','Telegram disabled.','muted');}catch(e){setText('telegram-status',e.message,'error');}}
+async function deleteAccount(id){if(!confirm('Delete this profile and its local state?'))return;try{await api('/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});refresh();}catch(e){alert(e.message);}}
+async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});refresh();}catch(e){alert(e.message);}}
+async function showDenylist(id){
+ try{const list=await api('/api/denylist/'+encodeURIComponent(id));const box=document.getElementById('denylist');box.replaceChildren();
+ const h=document.createElement('div');h.textContent=list.length+' cached entries';box.append(h);
+ for(const d of list.slice(0,200)){const x=document.createElement('div');x.textContent=d;box.append(x);}
+ }catch(e){setText('denylist',e.message,'error');}
 }
-refresh(); setInterval(refresh,5000);
+async function refresh(){
+ try{
+  const rt=await api('/api/runtime');setText('runtime',rt.running?'Running':'Stopped',rt.running?'ok':'muted');
+  setText('telegram-status',rt.telegram_configured?'Telegram configured.':'Telegram not configured.',rt.telegram_configured?'ok':'muted');
+  const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
+  for(const [k,v] of Object.entries(s)){if(k.startsWith('last_'))continue;const card=document.createElement('div');card.className='card';const l=document.createElement('div');l.className='muted';l.textContent=k.replaceAll('_',' ');const val=document.createElement('div');val.className='value';val.textContent=v;card.append(l,val);stats.append(card);}
+  const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+(s.last_error_at||''):'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
+  const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
+  if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
+  for(const a of accounts){const row=document.createElement('div');row.className='account';
+   const title=document.createElement('div');title.textContent=a.name+' · '+a.profile_id+' · '+(a.active?'Active':'Inactive');row.append(title);
+   const b=document.createElement('button');b.className=a.active?'stop':'start';b.textContent=a.active?'Disable':'Enable';b.onclick=()=>toggleAccount(a.profile_id,!a.active);row.append(b);
+   const v=document.createElement('button');v.className='neutral';v.textContent='View Denylist';v.onclick=()=>showDenylist(a.profile_id);row.append(v);
+   const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);row.append(del);box.append(row);
+  }
+  const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
+  for(const x of alerts){const tr=document.createElement('tr');for(const k of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){const td=document.createElement('td');td.textContent=x[k]??'';tr.append(td);}body.append(tr);}
+ }catch(e){setText('health','Dashboard error: '+e.message,'error');}
+}
+refresh();setInterval(refresh,5000);
 </script>
 </body>
 </html>"""
-
 
 def request_json() -> dict[str, Any]:
     data = request.get_json(silent=True)
@@ -1181,7 +1261,39 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
 
     @app.get("/api/runtime")
     def api_runtime() -> Any:
-        return jsonify({"running": sentinel.is_running()})
+        return jsonify({
+            "running": sentinel.is_running(),
+            "telegram_configured": bool(
+                sentinel.telegram_token and sentinel.telegram_chat_id
+            ),
+        })
+
+    @app.get("/api/accounts")
+    def api_accounts() -> Any:
+        accounts = []
+        for account in store.accounts():
+            accounts.append({
+                "profile_id": account["profile_id"],
+                "name": account["name"],
+                "profile_name": account["profile_name"],
+                "active": bool(account["active"]),
+                "added_at": account["added_at"],
+            })
+        return jsonify(accounts)
+
+    @app.get("/api/settings/telegram")
+    def api_telegram_settings() -> Any:
+        return jsonify({
+            "configured": bool(
+                sentinel.telegram_token and sentinel.telegram_chat_id
+            )
+        })
+
+    @app.get("/api/denylist/<profile_id>")
+    def api_denylist(profile_id: str) -> Any:
+        if not store.account_exists(profile_id):
+            return jsonify({"error": "Account not found."}), 404
+        return jsonify(store.denylist_entries(profile_id))
 
     @app.post("/api/monitor/start")
     def api_monitor_start() -> Any:
@@ -1208,8 +1320,8 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
             return jsonify({"error": "Profile ID and API key are required."}), 400
 
         try:
-            # Validate the key before storing it.
-            NextDNSClient(api_key)
+            # Fetching the denylist validates both the API key and profile.
+            NextDNSClient(api_key).denylist(profile_id)
             store.upsert_account({
                 "profile_id": profile_id,
                 "name": name,
@@ -1218,9 +1330,77 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
                 "active": True,
                 "added_at": utc_now(),
             })
-            return jsonify({"saved": True})
+            if not sentinel.is_running():
+                sentinel.start()
+            return jsonify({"saved": True, "running": sentinel.is_running()})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.post("/api/accounts/<profile_id>/toggle")
+    def api_account_toggle(profile_id: str) -> Any:
+        if not store.account_exists(profile_id):
+            return jsonify({"error": "Account not found."}), 404
+        data = request_json()
+        active = bool(data.get("active"))
+        if not active:
+            # Restarting is the safest way to drop the account's monitor thread.
+            sentinel.stop()
+        store.set_account_active(profile_id, active)
+        if active:
+            try:
+                sentinel.start()
+            except RuntimeError as exc:
+                return jsonify({"error": str(exc)}), 400
+        return jsonify({"active": active, "running": sentinel.is_running()})
+
+    @app.delete("/api/accounts/<profile_id>")
+    def api_account_delete(profile_id: str) -> Any:
+        if not store.account_exists(profile_id):
+            return jsonify({"error": "Account not found."}), 404
+        sentinel.stop()
+        store.delete_account(profile_id)
+        remaining = [a for a in store.accounts() if a["active"]]
+        if remaining:
+            sentinel.start()
+        return jsonify({"deleted": True, "running": sentinel.is_running()})
+
+    @app.post("/api/settings/telegram")
+    def api_telegram_save() -> Any:
+        data = request_json()
+        token = str(data.get("token", "")).strip()
+        chat_id = str(data.get("chat_id", "")).strip()
+        if not token or not chat_id:
+            return jsonify({"error": "Telegram bot token and chat ID are required."}), 400
+        try:
+            validate_telegram_credentials(token, chat_id)
+            store.set_secret("telegram_token", token)
+            store.set_secret("telegram_chat_id", chat_id)
+            sentinel.telegram_token = token
+            sentinel.telegram_chat_id = chat_id
+            return jsonify({"configured": True})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.delete("/api/settings/telegram")
+    def api_telegram_delete() -> Any:
+        store.delete_secret("telegram_token")
+        store.delete_secret("telegram_chat_id")
+        sentinel.telegram_token = ""
+        sentinel.telegram_chat_id = ""
+        return jsonify({"configured": False})
+
+    @app.post("/api/settings/telegram/test")
+    def api_telegram_test() -> Any:
+        if not sentinel.telegram_token or not sentinel.telegram_chat_id:
+            return jsonify({"error": "Telegram is not configured."}), 400
+        ok = send_telegram(
+            sentinel.telegram_token,
+            sentinel.telegram_chat_id,
+            "NextDNS Sentinel test notification.",
+        )
+        if not ok:
+            return jsonify({"error": "Telegram test notification failed."}), 502
+        return jsonify({"sent": True})
 
     return app
 
@@ -1275,10 +1455,10 @@ def main() -> None:
     bootstrap_accounts(store, config)
     telegram_token = os.getenv(
         config.get("telegram_token_env", "TELEGRAM_BOT_TOKEN"), ""
-    )
+    ) or store.get_secret("telegram_token")
     telegram_chat_id = os.getenv(
         config.get("telegram_chat_id_env", "TELEGRAM_CHAT_ID"), ""
-    )
+    ) or store.get_secret("telegram_chat_id")
     sentinel = Sentinel(store, telegram_token, telegram_chat_id)
 
     if args.dashboard or not args.monitor:
@@ -1287,6 +1467,11 @@ def main() -> None:
                 "Dashboard is exposed beyond localhost. "
                 "This application does not provide dashboard authentication."
             )
+        if not sentinel.is_running() and any(a["active"] for a in store.accounts()):
+            try:
+                sentinel.start()
+            except RuntimeError as exc:
+                logging.error("Automatic monitor start failed: %s", exc)
         logging.info("Dashboard available at http://%s:%s", args.host, args.port)
         create_app(store, sentinel).run(host=args.host, port=args.port, debug=False)
     elif args.monitor:

@@ -980,7 +980,7 @@ code{color:#9ed0ff}
 <h2>Recent alerts</h2>
 <table>
 <thead><tr>
-<th>Event Time</th><th>Detected At</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th>
+<th>Event Time</th><th>Detected At</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th><th>Attempts</th>
 </tr></thead>
 <tbody id="alerts"></tbody>
 </table>
@@ -1027,7 +1027,7 @@ async function refresh(){
       const row=document.createElement('div');
       row.textContent=account.name+' · '+(
         account.last_error
-          ? 'Error: '+account.last_error
+          ? 'Error: '+account.last_error+' · '+(account.last_error_at||'')
           : 'Last success: '+(account.last_success_at||'not available')
       );
       if(account.last_error) row.className='error';
@@ -1043,7 +1043,8 @@ async function refresh(){
       const tr=document.createElement('tr');
       for(const [key,code] of [
         ['event_timestamp',false],['created_at',false],['account_name',false],
-        ['domain',true],['matched_domain',true],['status',false],['reason',false]
+        ['domain',true],['matched_domain',true],['status',false],['reason',false],
+        ['notification_status',false],['notification_attempts',false]
       ]){
         const td=document.createElement('td');
         td.append(cell(x[key],code));

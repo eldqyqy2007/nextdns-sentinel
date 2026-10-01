@@ -1523,15 +1523,24 @@ class Store:
     def diagnostics(self):
         checks={}
         try:
-            with self._connect() as db: db.execute("SELECT 1"); checks["database"]=True
-        except Exception: checks["database"]=False
+            with self._connect() as db:
+                db.execute("SELECT 1")
+            checks["database"]=True
+        except Exception:
+            checks["database"]=False
         checks["encryption"]=bool(SECRET_KEY)
-        checks["schema"]=all(self._table_exists(t) for t in ("alerts","incidents","audit_log","sentinel_health","alert_rules"))
+        required=("alerts","incidents","audit_log","sentinel_health","alert_rules")
+        checks["schema"]=all(self._table_exists(t) for t in required)
         return checks
 
     def _table_exists(self, name):
-        with self._connect() as db:
-            return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone())
+        try:
+            with self._connect() as db:
+                return bool(db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(name,)
+                ).fetchone())
+        except Exception:
+            return False
 
 def record_rate_limit_event(endpoint: str, retry_after: float = 0.0, profile_id: str = "") -> None:
     try:
@@ -2472,7 +2481,7 @@ DASHBOARD = """<!doctype html>
 <div id="config-changes"><div class="muted">Loading...</div></div>
 </div>
 <div class="panel">
-<div class="section-head"><div><h2>Advanced Profile API Control</h2><div class="muted">Direct editor for the NextDNS API configuration of one selected profile. Use the readable view for understanding fields; the JSON editor is the advanced mode for exact API payloads.</div></div></div>
+<div class="section-head"><div><h2>Advanced Profile API Control</h2><div class="muted">Edit one selected profile only. The readable view explains every field returned by the NextDNS API. The formatted JSON is the exact payload sent when you apply changes.</div></div></div>
 <div class="meta">
 <div><strong>Profile</strong><span>Choose one monitored profile. Changes never apply to other profiles.</span></div>
 <div><strong>Security</strong><span>Threat and security filtering controls exposed by NextDNS.</span></div>
@@ -2483,7 +2492,7 @@ DASHBOARD = """<!doctype html>
 <div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile overview</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option></select></div>
 <div id="config-readable" class="mini-list"><div class="muted">Load a section to see a human-readable summary.</div></div>
 <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Advanced JSON editor</summary>
-<p class="muted">The JSON below is the exact API payload. Edit only fields supported by the selected NextDNS section, then apply the change.</p>
+<p class="muted">Example: change a boolean such as <code>true</code>/<code>false</code>, a list item, or a supported setting value. Keep the JSON structure intact. Sentinel validates the request through the NextDNS API and shows the returned error if NextDNS rejects it.</p>
 <textarea id="config-json" rows="16" style="width:100%;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;font-family:monospace"></textarea>
 </details>
 <div class="row"><button class="neutral" onclick="loadConfigSection()">Load Live Configuration</button><button class="start" onclick="saveConfigSection()">Apply Changes</button></div>
@@ -3111,7 +3120,7 @@ async function refresh(){
    const td=document.createElement('td');const b=document.createElement('button');b.className='neutral';b.textContent=x.seen_at?'Seen':'NEW';b.onclick=async()=>{await api('/api/alerts/'+x.id+'/seen',{method:'POST'});refresh()};td.append(b);tr.append(td);body.append(tr);
   }
   filterAlerts();
- }catch(e){setText('health','Dashboard error: '+e.message,'error');}
+ }catch(e){setText('health','Dashboard error: '+e.message,'error');showActionToast('Refresh failed: '+e.message,'error');}
 }
 setupDashboardPages();showPage(localStorage.getItem('sentinel_active_page')||'overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
 function setupDashboardPages(){
@@ -3914,14 +3923,26 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         return jsonify({"imported":result})
     @app.get("/api/control-center")
     def api_control_center() -> Any:
-        return jsonify({
-            "rules": features.rules(),
-            "maintenance": features.maintenance_active(),
-            "safe_mode": store.setting("safe_mode","0")=="1",
-            "api_auth": bool(store.setting("api_auth_hash","")),
-            "diagnostics": features.diagnostics(),
-            "rate_limits": features.rate_limit_history(20),
-        })
+        try:
+            return jsonify({
+                "rules": features.rules(),
+                "maintenance": features.maintenance_active(),
+                "safe_mode": store.setting("safe_mode","0")=="1",
+                "api_auth": bool(store.setting("api_auth_hash","")),
+                "diagnostics": features.diagnostics(),
+                "rate_limits": features.rate_limit_history(20),
+            })
+        except Exception as exc:
+            logging.exception("Control Center load failed")
+            return jsonify({
+                "error": f"Control Center could not load: {exc}",
+                "rules": [],
+                "maintenance": None,
+                "safe_mode": store.setting("safe_mode","0")=="1",
+                "api_auth": bool(store.setting("api_auth_hash","")),
+                "diagnostics": {"database": False, "encryption": bool(SECRET_KEY), "schema": False},
+                "rate_limits": [],
+            }), 503
 
     @app.get("/api/rules")
     def api_rules() -> Any: return jsonify(features.rules())

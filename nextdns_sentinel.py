@@ -3142,7 +3142,7 @@ function renderAnalytics(data){
   const wrap=document.createElement('div');wrap.className='bar-wrap';wrap.title=formatDateTime(point.time)+': '+point.count+' alert(s)';
   const value=document.createElement('span');value.className='bar-value';value.textContent=point.count?point.count:'';value.style.display=point.count?'block':'none';
   const bar=document.createElement('div');bar.className='bar';bar.style.height=(point.count?Math.max(4,(point.count/max)*100):2)+'%';
-  const label=document.createElement('span');label.className='bar-label';label.textContent=new Date(point.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const label=document.createElement('span');label.className='bar-label';const chartTime=new Date(point.time);const pad=n=>String(n).padStart(2,'0');label.textContent=pad(chartTime.getHours())+':'+pad(chartTime.getMinutes());
   wrap.append(value,bar,label);chart.append(wrap);
  }
  setText('analytics-total',(data.total_24h||0)+' alerts','');

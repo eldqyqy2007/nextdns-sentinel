@@ -3778,7 +3778,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not profile_name:
             return jsonify({"error": "NextDNS profile name is required."}), 400
         api_key = new_api_key or account["api_key"]
-        was_running = sentinel.is_running()
+        profile_running = bool((sentinel.profile_threads or {}).get(profile_id) and (sentinel.profile_threads or {}).get(profile_id).is_alive())
         try:
             client = NextDNSClient(api_key)
             profile_response = client._get(f"/profiles/{profile_id}")

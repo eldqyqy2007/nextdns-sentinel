@@ -2460,11 +2460,21 @@ DASHBOARD = """<!doctype html>
 <div id="config-changes"><div class="muted">Loading...</div></div>
 </div>
 <div class="panel">
-<h2>Advanced Profile API Control</h2>
-<div class="muted">Scoped controls for profile configuration exposed directly through the NextDNS API. Send only the fields you intend to change.</div>
-<div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option></select></div>
-<textarea id="config-json" rows="10" style="width:100%;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;font-family:monospace"></textarea>
-<button class="neutral" onclick="loadConfigSection()">Load Live Config</button><button class="start" onclick="saveConfigSection()">Apply API Change</button>
+<div class="section-head"><div><h2>Advanced Profile API Control</h2><div class="muted">Direct editor for the NextDNS API configuration of one selected profile. Use the readable view for understanding fields; the JSON editor is the advanced mode for exact API payloads.</div></div></div>
+<div class="meta">
+<div><strong>Profile</strong><span>Choose one monitored profile. Changes never apply to other profiles.</span></div>
+<div><strong>Security</strong><span>Threat and security filtering controls exposed by NextDNS.</span></div>
+<div><strong>Privacy</strong><span>Blocklists, tracker/privacy and related privacy options.</span></div>
+<div><strong>Parental Control</strong><span>Categories, services, SafeSearch and bypass controls.</span></div>
+<div><strong>Settings</strong><span>Logging, retention, performance, block page and other settings.</span></div>
+</div>
+<div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile overview</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option></select></div>
+<div id="config-readable" class="mini-list"><div class="muted">Load a section to see a human-readable summary.</div></div>
+<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Advanced JSON editor</summary>
+<p class="muted">The JSON below is the exact API payload. Edit only fields supported by the selected NextDNS section, then apply the change.</p>
+<textarea id="config-json" rows="16" style="width:100%;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;font-family:monospace"></textarea>
+</details>
+<div class="row"><button class="neutral" onclick="loadConfigSection()">Load Live Configuration</button><button class="start" onclick="saveConfigSection()">Apply Changes</button></div>
 <div class="status" id="config-status">Select a profile and load its live configuration.</div>
 </div>
 <div class="panel">
@@ -2567,7 +2577,16 @@ DASHBOARD = """<!doctype html>
 <div class="panel"><h3>Alert Rules</h3><div class="row"><input id="rule-name" placeholder="Rule name"><input id="rule-json" placeholder='{"action":"suppress","domain":"example.com"}'><button class="start" onclick="saveRule()">Save Rule</button></div><div id="rules-list" class="mini-list"></div></div>
 <div class="panel"><h3>Maintenance / Suppression</h3><div class="row"><input id="maintenance-seconds" type="number" min="60" value="3600"><input id="maintenance-reason" placeholder="Reason"><button class="neutral" onclick="enableMaintenance()">Enable Maintenance</button></div><div class="row"><input id="suppression-fingerprint" placeholder="Fingerprint"><input id="suppression-seconds" type="number" min="30" value="600"><button class="neutral" onclick="addSuppression()">Suppress</button></div></div>
 </div>
-<div class="row"><button class="neutral" onclick="toggleSafeMode()">Toggle Safe Mode</button><button class="neutral" onclick="loadDiagnostics()">Diagnostics</button><button class="neutral" onclick="loadIncidentMetrics()">Incident Metrics</button><input id="retention-days" type="number" min="1" value="30" style="max-width:120px"><button class="neutral" onclick="runRetention()">Cleanup Database</button><button class="neutral" onclick="showConfigDiff()">Latest Config Diff</button><button class="neutral" onclick="loadRiskBaseline()">Risk / Baseline</button><button class="neutral" onclick="loadRateLimits()">Rate Limits</button><input id="api-auth-token" type="password" placeholder="API token (16+ chars)"><button class="neutral" onclick="configureApiAuth()">Enable/Login API Auth</button><button class="neutral" onclick="logoutApiAuth()">Logout</button></div>
+<div class="mini-list">
+<div class="mini-item"><span><strong>Safe Mode</strong><br><span class="muted">Temporarily blocks configuration-changing API actions.</span></span><button class="neutral" onclick="toggleSafeMode()">Toggle</button></div>
+<div class="mini-item"><span><strong>Diagnostics</strong><br><span class="muted">Checks database, encryption and required tables.</span></span><button class="neutral" onclick="loadDiagnostics()">Run</button></div>
+<div class="mini-item"><span><strong>Incident Metrics</strong><br><span class="muted">Shows incident counts and mean time to resolve.</span></span><button class="neutral" onclick="loadIncidentMetrics()">View</button></div>
+<div class="mini-item"><span><strong>Database Cleanup</strong><br><span class="muted">Deletes old operational records and attempts SQLite VACUUM.</span></span><span class="row"><input id="retention-days" type="number" min="1" value="30" style="max-width:90px"><button class="neutral" onclick="runRetention()">Run</button></span></div>
+<div class="mini-item"><span><strong>Latest Config Diff</strong><br><span class="muted">Shows the latest detected configuration difference.</span></span><button class="neutral" onclick="showConfigDiff()">View</button></div>
+<div class="mini-item"><span><strong>Risk / Baseline</strong><br><span class="muted">Shows historical risk and learned hourly activity baseline.</span></span><button class="neutral" onclick="loadRiskBaseline()">View</button></div>
+<div class="mini-item"><span><strong>Rate Limits</strong><br><span class="muted">Shows recent NextDNS API rate-limit telemetry.</span></span><button class="neutral" onclick="loadRateLimits()">View</button></div>
+<div class="mini-item"><span><strong>API Authentication</strong><br><span class="muted">Protects Sentinel's local API with a bearer token.</span></span><span class="row"><input id="api-auth-token" type="password" placeholder="16+ chars" style="max-width:180px"><button class="neutral" onclick="configureApiAuth()">Enable / Login</button><button class="neutral" onclick="logoutApiAuth()">Logout</button></span></div>
+</div>
 <div id="control-details" class="mini-list"></div>
 </div>
 
@@ -2966,9 +2985,23 @@ async function loadConfigChanges(){
   }
  }catch(e){}
 }
+function renderConfigReadable(value,path=''){
+ const box=document.getElementById('config-readable');box.replaceChildren();
+ const walk=(obj,prefix)=>{
+  if(obj===null||typeof obj!=='object'){
+   const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=prefix||'value';row.lastChild.textContent=String(obj);box.append(row);return;
+  }
+  for(const [key,val] of Object.entries(obj)){
+   const label=(prefix?prefix+'.':'')+key;
+   if(val&&typeof val==='object'&&!Array.isArray(val)){const head=document.createElement('div');head.className='mini-item';head.innerHTML='<strong></strong><span></span>';head.firstChild.textContent=label;head.lastChild.textContent='section';box.append(head);walk(val,label);}
+   else {const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=Array.isArray(val)?(val.length+' item(s)'):String(val);box.append(row);}
+  }
+ };
+ walk(value,path);
+}
 async function loadConfigSection(){
  const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;if(!id)return;
- try{const d=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section));document.getElementById('config-json').value=JSON.stringify(d,null,2);setText('config-status','Live configuration loaded.','ok');}catch(e){setText('config-status',e.message,'error');}
+ try{const d=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section));document.getElementById('config-json').value=JSON.stringify(d,null,2);renderConfigReadable(d);setText('config-status','Live configuration loaded. Review the readable fields before applying changes.','ok');}catch(e){setText('config-status','Load failed: '+e.message,'error');}
 }
 async function saveConfigSection(){
  const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;let data;

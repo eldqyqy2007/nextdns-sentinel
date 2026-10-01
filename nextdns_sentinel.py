@@ -22,7 +22,7 @@ from typing import Any
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 APP_NAME = "NextDNS Sentinel"
 DB_PATH = Path(os.getenv("NEXTDNS_SENTINEL_DB", "data/sentinel.db"))
@@ -791,6 +791,7 @@ class Sentinel:
     telegram_token: str = ""
     telegram_chat_id: str = ""
     stop_event: threading.Event | None = None
+    threads: list[threading.Thread] | None = None
 
     def notify(
         self,
@@ -958,14 +959,18 @@ class Sentinel:
                 else:
                     time.sleep(max(CHECK_INTERVAL, 10))
 
-    def run(self) -> None:
+    def start(self) -> int:
+        if self.is_running():
+            return 0
+
         accounts = [a for a in self.store.accounts() if a["active"]]
         if not accounts:
-            raise RuntimeError("No active accounts configured.")
+            raise RuntimeError(
+                "No active accounts configured. Add a NextDNS profile from the dashboard."
+            )
 
-        stop_event = threading.Event()
-        self.stop_event = stop_event
-        threads = [
+        self.stop_event = threading.Event()
+        self.threads = [
             threading.Thread(
                 target=self.monitor_account,
                 args=(account,),
@@ -975,22 +980,36 @@ class Sentinel:
             for account in accounts
         ]
 
-        for thread in threads:
+        for thread in self.threads:
             thread.start()
 
         logging.info(
-            "%s is monitoring %d account(s). Press Ctrl+C to stop.",
+            "%s is monitoring %d account(s).",
             APP_NAME,
-            len(threads),
+            len(self.threads),
         )
+        return len(self.threads)
+
+    def is_running(self) -> bool:
+        return bool(self.threads and any(thread.is_alive() for thread in self.threads))
+
+    def stop(self) -> None:
+        if self.stop_event:
+            self.stop_event.set()
+        for thread in self.threads or []:
+            thread.join(timeout=CHECK_INTERVAL + 5)
+        self.threads = None
+        self.stop_event = None
+        logging.info("Stopped %s.", APP_NAME)
+
+    def run(self) -> None:
+        self.start()
         try:
             while True:
                 time.sleep(3600)
         except KeyboardInterrupt:
             logging.info("Stopping %s.", APP_NAME)
-            stop_event.set()
-            for thread in threads:
-                thread.join(timeout=CHECK_INTERVAL + 5)
+            self.stop()
 
 
 DASHBOARD = """<!doctype html>
@@ -1000,115 +1019,148 @@ DASHBOARD = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NextDNS Sentinel</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#080b12;color:#e8edf7;margin:0;padding:32px}
+body{font-family:system-ui,sans-serif;background:#080b12;color:#e8edf7;margin:0;padding:20px}
 main{max-width:1100px;margin:auto}
-h1{margin-bottom:6px}.muted{color:#8c98aa}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:28px 0}
-.card{background:#101621;border:1px solid #202a3a;border-radius:14px;padding:20px}
-.value{font-size:32px;font-weight:700}
+h1{margin-bottom:4px}.muted{color:#8c98aa}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0}
+.card,.panel{background:#101621;border:1px solid #202a3a;border-radius:14px;padding:18px}
+.value{font-size:28px;font-weight:700}
+button{border:0;border-radius:9px;padding:10px 15px;font-weight:700;cursor:pointer;margin:4px}
+.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}
+input{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:8px;padding:11px;margin:6px 0 12px}
+label{display:block;font-size:14px;color:#aeb8c8}
+.status{margin:12px 0;padding:11px 14px;border-radius:10px;background:#101621;border:1px solid #202a3a}
+.error{color:#ffb4b4}.ok{color:#9af0bb}
 table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}
-th,td{text-align:left;padding:13px;border-bottom:1px solid #202a3a}
+th,td{text-align:left;padding:11px;border-bottom:1px solid #202a3a;font-size:13px}
 code{color:#9ed0ff}
-.status{margin:12px 0;padding:10px 14px;border-radius:10px;background:#101621;border:1px solid #202a3a}
-.error{color:#ffb4b4}
+.hidden{display:none}
 </style>
 </head>
 <body>
 <main>
 <h1>NextDNS Sentinel</h1>
-<p class="muted">Local monitoring dashboard</p>
-<div class="status" id="health">Loading monitor health...</div>
-<div class="status" id="accounts-health">Loading account health...</div>
+<p class="muted">Local monitoring and setup console</p>
+
+<div class="panel" id="setup">
+<h2>First-time setup</h2>
+<p class="muted">Add a NextDNS profile once. The API key is encrypted and stored locally.</p>
+<form id="setup-form">
+<label>Profile ID<input name="profile_id" required placeholder="e.g. abc123"></label>
+<label>Profile name<input name="profile_name" placeholder="My NextDNS Profile"></label>
+<label>Display name<input name="name" required placeholder="Primary Profile"></label>
+<label>NextDNS API key<input name="api_key" type="password" required placeholder="Paste API key"></label>
+<button class="start" type="submit">Save profile</button>
+</form>
+<div class="status" id="setup-message"></div>
+</div>
+
+<div class="panel">
+<strong>Monitor</strong>
+<span id="runtime" class="muted">Checking status...</span>
+<div>
+<button class="start" onclick="controlMonitor('start')">Start Monitoring</button>
+<button class="stop" onclick="controlMonitor('stop')">Stop Monitoring</button>
+</div>
+<div class="status" id="health">Loading health...</div>
+</div>
+
 <div class="grid" id="stats"></div>
+
+<div class="panel">
+<h2>Configured profiles</h2>
+<div id="accounts-health" class="muted">Loading...</div>
+</div>
+
 <h2>Recent alerts</h2>
 <table>
 <thead><tr>
-<th>Event Time</th><th>Detected At</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th><th>Attempts</th>
+<th>Event Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th><th>Notification</th>
 </tr></thead>
 <tbody id="alerts"></tbody>
 </table>
 </main>
 <script>
-function cell(value, code=false){
-  const el=document.createElement(code?'code':'span');
-  el.textContent=value ?? '';
-  return el;
+function setText(id,text,cls=''){const el=document.getElementById(id);el.textContent=text;el.className=cls;}
+async function api(path,options={}){
+  const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(data.error||'HTTP '+r.status);
+  return data;
 }
+async function controlMonitor(action){
+  try{
+    const data=await api('/api/monitor/'+action,{method:'POST'});
+    setText('runtime',data.running?'Running':'Stopped',data.running?'ok':'muted');
+    refresh();
+  }catch(e){setText('runtime',e.message,'error');}
+}
+document.getElementById('setup-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const data=Object.fromEntries(new FormData(e.target).entries());
+  try{
+    await api('/api/setup/account',{method:'POST',body:JSON.stringify(data)});
+    setText('setup-message','Profile saved. You can start monitoring now.','ok');
+    e.target.reset();
+    refresh();
+  }catch(err){setText('setup-message',err.message,'error');}
+});
 async function refresh(){
   try{
-    const statsResponse=await fetch('/api/stats');
-    if(!statsResponse.ok) throw new Error('Stats API returned HTTP '+statsResponse.status);
-    const s=await statsResponse.json();
-    const stats=document.querySelector('#stats');
-    stats.replaceChildren();
+    const runtime=await api('/api/runtime');
+    setText('runtime',runtime.running?'Running':'Stopped',runtime.running?'ok':'muted');
+
+    const s=await api('/api/stats');
+    const stats=document.querySelector('#stats'); stats.replaceChildren();
     for(const [k,v] of Object.entries(s)){
       if(k==='last_success_at'||k==='last_error'||k==='last_error_at') continue;
-      const card=document.createElement('div');
-      card.className='card';
-      const label=document.createElement('div');
-      label.className='muted';
-      label.textContent=k.replaceAll('_',' ');
-      const value=document.createElement('div');
-      value.className='value';
-      value.textContent=v;
-      card.append(label,value);
-      stats.append(card);
+      const card=document.createElement('div'); card.className='card';
+      const label=document.createElement('div'); label.className='muted'; label.textContent=k.replaceAll('_',' ');
+      const value=document.createElement('div'); value.className='value'; value.textContent=v;
+      card.append(label,value); stats.append(card);
     }
     const health=document.querySelector('#health');
-    health.className='status';
+    health.className='status '+(s.last_error?'error':'ok');
     health.textContent=s.last_error
       ? 'Monitor error: '+s.last_error+' · '+(s.last_error_at||'')
       : 'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
-    if(s.last_error) health.classList.add('error');
 
-    const healthResponse=await fetch('/api/health');
-    if(!healthResponse.ok) throw new Error('Health API returned HTTP '+healthResponse.status);
-    const accountHealth=await healthResponse.json();
-    const healthBox=document.querySelector('#accounts-health');
-    healthBox.replaceChildren();
-    for(const account of accountHealth){
+    const accounts=await api('/api/health');
+    const box=document.querySelector('#accounts-health'); box.replaceChildren();
+    document.querySelector('#setup').classList.toggle('hidden',accounts.length>0);
+    if(!accounts.length) box.textContent='No profiles configured yet.';
+    for(const a of accounts){
       const row=document.createElement('div');
-      row.textContent=account.name+' · '+(
-        account.last_error
-          ? 'Error: '+account.last_error+' · '+(account.last_error_at||'')
-          : 'Last success: '+(account.last_success_at||'not available')
+      row.textContent=a.name+' · '+(a.active?'Active':'Inactive')+' · '+(
+        a.last_error?'Error: '+a.last_error:'Last success: '+(a.last_success_at||'not available')
       );
-      if(account.last_error) row.className='error';
-      healthBox.append(row);
+      if(a.last_error) row.className='error';
+      box.append(row);
     }
 
-    const alertsResponse=await fetch('/api/alerts');
-    if(!alertsResponse.ok) throw new Error('Alerts API returned HTTP '+alertsResponse.status);
-    const alerts=await alertsResponse.json();
-    const body=document.querySelector('#alerts');
-    body.replaceChildren();
+    const alerts=await api('/api/alerts');
+    const body=document.querySelector('#alerts'); body.replaceChildren();
     for(const x of alerts){
       const tr=document.createElement('tr');
-      for(const [key,code] of [
-        ['event_timestamp',false],['created_at',false],['account_name',false],
-        ['domain',true],['matched_domain',true],['status',false],['reason',false],
-        ['notification_status',false],['notification_attempts',false]
-      ]){
-        const td=document.createElement('td');
-        td.append(cell(x[key],code));
-        tr.append(td);
+      for(const key of ['event_timestamp','account_name','domain','matched_domain','status','reason','notification_status']){
+        const td=document.createElement('td'); td.textContent=x[key]??''; tr.append(td);
       }
       body.append(tr);
     }
-  }catch(error){
-    const health=document.querySelector('#health');
-    health.className='status error';
-    health.textContent='Dashboard refresh failed: '+error;
-  }
+  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
-refresh();
-setInterval(refresh,5000);
+refresh(); setInterval(refresh,5000);
 </script>
 </body>
 </html>"""
 
 
-def create_app(store: Store) -> Flask:
+def request_json() -> dict[str, Any]:
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def create_app(store: Store, sentinel: Sentinel) -> Flask:
     app = Flask(__name__)
 
     @app.get("/")
@@ -1126,6 +1178,49 @@ def create_app(store: Store) -> Flask:
     @app.get("/api/alerts")
     def api_alerts() -> Any:
         return jsonify(store.recent_alerts())
+
+    @app.get("/api/runtime")
+    def api_runtime() -> Any:
+        return jsonify({"running": sentinel.is_running()})
+
+    @app.post("/api/monitor/start")
+    def api_monitor_start() -> Any:
+        try:
+            count = sentinel.start()
+            return jsonify({"running": sentinel.is_running(), "accounts": count})
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/api/monitor/stop")
+    def api_monitor_stop() -> Any:
+        sentinel.stop()
+        return jsonify({"running": False})
+
+    @app.post("/api/setup/account")
+    def api_setup_account() -> Any:
+        data = request_json()
+        profile_id = str(data.get("profile_id", "")).strip()
+        api_key = str(data.get("api_key", "")).strip()
+        name = str(data.get("name", "")).strip() or "NextDNS Profile"
+        profile_name = str(data.get("profile_name", "")).strip()
+
+        if not profile_id or not api_key:
+            return jsonify({"error": "Profile ID and API key are required."}), 400
+
+        try:
+            # Validate the key before storing it.
+            NextDNSClient(api_key)
+            store.upsert_account({
+                "profile_id": profile_id,
+                "name": name,
+                "profile_name": profile_name,
+                "api_key": api_key,
+                "active": True,
+                "added_at": utc_now(),
+            })
+            return jsonify({"saved": True})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
 
     return app
 
@@ -1186,17 +1281,16 @@ def main() -> None:
     )
     sentinel = Sentinel(store, telegram_token, telegram_chat_id)
 
-    if args.dashboard:
+    if args.dashboard or not args.monitor:
         if args.host not in {"127.0.0.1", "localhost", "::1"}:
             logging.warning(
                 "Dashboard is exposed beyond localhost. "
                 "This application does not provide dashboard authentication."
             )
-        create_app(store).run(host=args.host, port=args.port, debug=False)
+        logging.info("Dashboard available at http://%s:%s", args.host, args.port)
+        create_app(store, sentinel).run(host=args.host, port=args.port, debug=False)
     elif args.monitor:
         sentinel.run()
-    else:
-        parser.print_help()
 
 
 if __name__ == "__main__":

@@ -1571,6 +1571,14 @@ DASHBOARD = """<!doctype html>
 <div id="config-changes"><div class="muted">Loading...</div></div>
 </div>
 <div class="panel">
+<h2>Advanced Profile API Control</h2>
+<div class="muted">Scoped controls for profile configuration exposed directly through the NextDNS API. Send only the fields you intend to change.</div>
+<div class="row"><select id="config-profile"></select><select id="config-section"><option value="profile">Profile</option><option value="security">Security</option><option value="privacy">Privacy</option><option value="parentalControl">Parental Control</option><option value="settings">Settings</option></select></div>
+<textarea id="config-json" rows="10" style="width:100%;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;font-family:monospace"></textarea>
+<button class="neutral" onclick="loadConfigSection()">Load Live Config</button><button class="start" onclick="saveConfigSection()">Apply API Change</button>
+<div class="status" id="config-status">Select a profile and load its live configuration.</div>
+</div>
+<div class="panel">
 <h2>Telegram Alerts</h2>
 <form id="telegram-form">
 <label>Bot token<input name="token" type="password" placeholder="123456:ABC..."></label>
@@ -1881,6 +1889,16 @@ async function loadConfigChanges(){
   }
  }catch(e){}
 }
+async function loadConfigSection(){
+ const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;if(!id)return;
+ try{const d=await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section));document.getElementById('config-json').value=JSON.stringify(d,null,2);setText('config-status','Live configuration loaded.','ok');}catch(e){setText('config-status',e.message,'error');}
+}
+async function saveConfigSection(){
+ const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;let data;
+ try{data=JSON.parse(document.getElementById('config-json').value)}catch(e){setText('config-status','Invalid JSON.','error');return;}
+ if(!confirm('Apply this configuration through the NextDNS API?'))return;
+ try{await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});setText('config-status','Change applied successfully.','ok');loadConfigChanges();}catch(e){setText('config-status',e.message,'error');}
+}
 async function loadAlertLogSettings(){
  try{
   const d=await api('/api/settings/alert-logs');
@@ -1929,6 +1947,7 @@ async function refresh(){
    const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=()=>editProfile(a.profile_id);row.append(edit);
    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteAccount(a.profile_id);row.append(del);box.append(row);
   }
+  const cfgSelect=document.getElementById('config-profile');cfgSelect.replaceChildren();for(const a of accounts){const o=document.createElement('option');o.value=a.profile_id;o.textContent=a.name+' ('+a.profile_id+')';cfgSelect.append(o);}
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
   for(const x of alerts){
@@ -2135,6 +2154,35 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
             ])
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/profiles/<profile_id>/config/<section>")
+    def api_profile_config_get(profile_id:str,section:str)->Any:
+        allowed={"profile","security","privacy","parentalControl","settings"}
+        if section not in allowed: return jsonify({"error":"Unsupported configuration section."}),400
+        account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
+        if not account: return jsonify({"error":"Account not found."}),404
+        try:
+            client=NextDNSClient(account["api_key"])
+            if section=="profile": data=client.profile(profile_id)
+            else: data=client._get(f"/profiles/{profile_id}/{section}").get("data",{})
+            return jsonify(data)
+        except Exception as exc: return jsonify({"error":str(exc)}),400
+
+    @app.patch("/api/profiles/<profile_id>/config/<section>")
+    def api_profile_config_patch(profile_id:str,section:str)->Any:
+        allowed={"profile","security","privacy","parentalControl","settings"}
+        if section not in allowed: return jsonify({"error":"Unsupported configuration section."}),400
+        data=request_json()
+        account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
+        if not account: return jsonify({"error":"Account not found."}),404
+        try:
+            client=NextDNSClient(account["api_key"])
+            path=f"/profiles/{profile_id}" if section=="profile" else f"/profiles/{profile_id}/{section}"
+            result=client._patch(path,data)
+            live=client.profile(profile_id)
+            store.save_config_snapshot(profile_id,config_snapshot(live))
+            return jsonify({"saved":True,"section":section,"response":result,"profile":live})
+        except Exception as exc: return jsonify({"error":str(exc)}),400
 
     @app.get("/api/accounts/<profile_id>")
     def api_account_detail(profile_id: str) -> Any:

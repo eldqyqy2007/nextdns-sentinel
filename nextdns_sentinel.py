@@ -4022,6 +4022,10 @@ def main() -> None:
     telegram_chat_id = os.getenv(
         config.get("telegram_chat_id_env", "TELEGRAM_CHAT_ID"), ""
     ) or store.get_secret("telegram_chat_id")
+    telegram_enabled = store.setting("telegram_enabled","1") == "1"
+    if not telegram_enabled:
+        telegram_token = ""
+        telegram_chat_id = ""
     features = FeatureStore(DB_PATH)
     sentinel = Sentinel(store, features, telegram_token, telegram_chat_id)
 

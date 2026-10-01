@@ -276,8 +276,20 @@ class Store:
             domains = db.execute("SELECT COUNT(*) FROM denylist").fetchone()[0]
             state = db.execute(
                 """
-                SELECT MAX(last_success_at), MAX(last_error)
+                SELECT last_success_at,last_error
                 FROM monitor_state
+                ORDER BY CASE WHEN last_success_at='' THEN 0 ELSE 1 END DESC,
+                         last_success_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            error_state = db.execute(
+                """
+                SELECT last_error
+                FROM monitor_state
+                WHERE last_error<>''
+                ORDER BY last_error DESC
+                LIMIT 1
                 """
             ).fetchone()
             return {
@@ -285,8 +297,8 @@ class Store:
                 "active_accounts": active,
                 "alerts": alerts,
                 "denylist_entries": domains,
-                "last_success_at": state[0] or "",
-                "last_error": state[1] or "",
+                "last_success_at": state[0] if state else "",
+                "last_error": error_state[0] if error_state else "",
                 "poll_interval_seconds": CHECK_INTERVAL,
             }
 
@@ -396,7 +408,7 @@ class NextDNSClient:
     def logs(self, profile_id: str, from_ms: int) -> list[dict[str, Any]]:
         values: list[dict[str, Any]] = []
         cursor: str | None = None
-        from_value = str(from_ms)
+        from_value = datetime.fromtimestamp(from_ms / 1000, timezone.utc).isoformat()
 
         while True:
             params: dict[str, Any] = {
@@ -735,7 +747,9 @@ function cell(value, code=false){
 }
 async function refresh(){
   try{
-    const s=await fetch('/api/stats').then(r=>r.json());
+    const statsResponse=await fetch('/api/stats');
+    if(!statsResponse.ok) throw new Error('Stats API returned HTTP '+statsResponse.status);
+    const s=await statsResponse.json();
     const stats=document.querySelector('#stats');
     stats.replaceChildren();
     for(const [k,v] of Object.entries(s)){
@@ -758,7 +772,9 @@ async function refresh(){
       : 'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
     if(s.last_error) health.classList.add('error');
 
-    const alerts=await fetch('/api/alerts').then(r=>r.json());
+    const alertsResponse=await fetch('/api/alerts');
+    if(!alertsResponse.ok) throw new Error('Alerts API returned HTTP '+alertsResponse.status);
+    const alerts=await alertsResponse.json();
     const body=document.querySelector('#alerts');
     body.replaceChildren();
     for(const x of alerts){

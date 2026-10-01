@@ -8,7 +8,6 @@
   <img src="https://img.shields.io/badge/storage-SQLite-003B57?labelColor=555&logo=sqlite&logoColor=white" alt="storage: SQLite">
   <img src="https://img.shields.io/badge/interface-CLI%20%2B%20Web-6f42c1?labelColor=555" alt="CLI and Web">
   <img src="https://img.shields.io/badge/alerts-Telegram-26A5E4?labelColor=555" alt="Telegram alerts">
-  <img src="https://img.shields.io/github/actions/workflow/status/eldqyqy2007/nextdns-sentinel/tests.yml?label=tests" alt="tests">
 </p>
 
 # <img src="./assets/icons/sentinel.svg" alt="" width="32" height="32" align="absmiddle"> NextDNS Sentinel
@@ -55,7 +54,6 @@ Sentinel is built for defensive visibility over NextDNS configurations you are a
 - **Local dashboard** with statistics, recent alerts, and monitor health.
 - **Environment-based secrets** and localhost-first dashboard binding.
 - **Graceful shutdown** for monitor workers.
-- **Automated tests** and GitHub Actions CI.
 
 ## <img src="./assets/icons/process.svg" alt="" width="24" height="24" align="absmiddle"> Architecture
 

@@ -320,7 +320,8 @@ class Store:
             cursor = db.execute(
                 """
                 DELETE FROM alerts
-                WHERE created_at<? AND notified_at<>''
+                WHERE created_at<?
+                  AND notification_status IN ('sent','suppressed','failed')
                 """,
                 (cutoff,),
             )

@@ -1799,6 +1799,18 @@ function renderIntelligence(data){
  const risks=(data?.intelligence?.domain_risk||[]).map(x=>x.domain_risk+': '+x.count).join(' · ');
  setText('domain-risk',risks||'None','');
 }
+async function loadDeviceDetail(profileId,deviceId){
+ try{
+  const d=await api('/api/devices/'+encodeURIComponent(profileId)+'/'+encodeURIComponent(deviceId));
+  const box=document.getElementById('operations-center');box.replaceChildren();
+  const title=document.createElement('div');title.className='mini-item';title.innerHTML='<strong></strong><span></span>';
+  title.firstChild.textContent=(d.device?.device_name||deviceId)+' investigation';
+  title.lastChild.textContent='Profile '+profileId;
+  box.append(title);
+  for(const a of d.alerts||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=(a.severity||'medium').toUpperCase()+' · '+(a.domain||a.alert_type);row.lastChild.textContent=formatDateTime(a.event_timestamp||a.created_at);row.title=a.reason||'';box.append(row);}
+  box.scrollIntoView({behavior:'smooth',block:'nearest'});
+ }catch(e){setText('operations-center',e.message,'error');}
+}
 async function loadIncidents(){
  const items=await api('/api/incidents?limit=20');const box=document.getElementById('incidents');box.replaceChildren();
  setText('incident-count',items.length+' incidents','');
@@ -1898,6 +1910,8 @@ function renderDevices(items){
  const now=Date.now();
  for(const x of items){
   const c=document.createElement('div');c.className='device-item';
+  c.style.cursor='pointer';c.title='Open device investigation details';
+  c.onclick=()=>loadDeviceDetail(x.profile_id,x.device_id);
   const n=document.createElement('div');n.className='name';n.textContent=x.device_name||x.device_id||'Unidentified device';
   const last=x.last_seen_at?new Date(x.last_seen_at).getTime():0;const active=last&&now-last<=180000;
   const l=document.createElement('div');l.className='line';l.innerHTML='<span>Activity</span><strong></strong>';l.lastChild.textContent=active?'Active recently':'No recent DNS activity';l.lastChild.className=active?'ok':'error';

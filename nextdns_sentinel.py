@@ -35,6 +35,8 @@ POLL_OVERLAP_MS = max(0, int(os.getenv("NEXTDNS_SENTINEL_POLL_OVERLAP_MS", "5000
 ALERT_COOLDOWN = max(0, int(os.getenv("NEXTDNS_SENTINEL_ALERT_COOLDOWN", "300")))
 ALERT_RETENTION_DAYS = max(0, int(os.getenv("NEXTDNS_SENTINEL_ALERT_RETENTION_DAYS", "90")))
 API_RETRIES = max(0, int(os.getenv("NEXTDNS_SENTINEL_API_RETRIES", "3")))
+NOTIFICATION_RETRY_BASE = max(5, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_BASE", "30")))
+NOTIFICATION_RETRY_MAX = max(NOTIFICATION_RETRY_BASE, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_MAX", "900")))
 SECRET_KEY = os.getenv("NEXTDNS_SENTINEL_SECRET_KEY", "")
 
 
@@ -98,7 +100,10 @@ class Store:
                     event_key TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL,
                     notified_at TEXT NOT NULL DEFAULT '',
-                    notification_status TEXT NOT NULL DEFAULT 'pending'
+                    notification_status TEXT NOT NULL DEFAULT 'pending',
+                    notification_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_notification_attempt_at TEXT NOT NULL DEFAULT '',
+                    next_retry_at TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_alerts_created_at
@@ -130,6 +135,12 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN event_timestamp TEXT NOT NULL DEFAULT ''")
         if "notification_status" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN notification_status TEXT NOT NULL DEFAULT 'pending'")
+        if "notification_attempts" not in columns:
+            db.execute("ALTER TABLE alerts ADD COLUMN notification_attempts INTEGER NOT NULL DEFAULT 0")
+        if "last_notification_attempt_at" not in columns:
+            db.execute("ALTER TABLE alerts ADD COLUMN last_notification_attempt_at TEXT NOT NULL DEFAULT ''")
+        if "next_retry_at" not in columns:
+            db.execute("ALTER TABLE alerts ADD COLUMN next_retry_at TEXT NOT NULL DEFAULT ''")
 
     def upsert_account(self, account: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as db:
@@ -261,6 +272,28 @@ class Store:
                 "UPDATE alerts SET notification_status='suppressed' WHERE event_key=?",
                 (event_key,),
             )
+    def mark_notification_failed(self, event_key: str) -> None:
+        now = datetime.now(timezone.utc)
+        with sqlite3.connect(self.path) as db:
+            row = db.execute(
+                "SELECT notification_attempts FROM alerts WHERE event_key=?",
+                (event_key,),
+            ).fetchone()
+            attempts = int(row[0]) + 1 if row else 1
+            delay = min(NOTIFICATION_RETRY_BASE * (2 ** min(attempts - 1, 10)), NOTIFICATION_RETRY_MAX)
+            next_retry_at = datetime.fromtimestamp(
+                now.timestamp() + delay, timezone.utc
+            ).isoformat()
+            db.execute(
+                """
+                UPDATE alerts
+                SET notification_attempts=?,
+                    last_notification_attempt_at=?,
+                    next_retry_at=?
+                WHERE event_key=? AND notification_status='pending'
+                """,
+                (attempts, now.isoformat(), next_retry_at, event_key),
+            )
 
     def cleanup_alerts(self, retention_days: int) -> int:
         if retention_days <= 0:
@@ -291,9 +324,10 @@ class Store:
                     FROM alerts
                     WHERE profile_id=? AND notified_at=''
                       AND notification_status='pending'
+                      AND (next_retry_at='' OR next_retry_at<=?)
                     ORDER BY id ASC LIMIT ?
                     """,
-                    (profile_id, limit),
+                    (profile_id, utc_now(), limit),
                 )
             ]
 
@@ -806,6 +840,8 @@ Client IP: {client_ip}"
                             )
                             if delivered:
                                 self.store.mark_alert_notified(key)
+                            else:
+                                self.store.mark_notification_failed(key)
                         else:
                             self.store.mark_alert_suppressed(key)
                             logging.info(
@@ -825,6 +861,8 @@ Client IP: {client_ip}"
                     )
                     if delivered:
                         self.store.mark_alert_notified(alert["event_key"])
+                    else:
+                        self.store.mark_notification_failed(alert["event_key"])
 
                 self.store.set_poll_state(profile_id, now_ms)
                 if self.stop_event:

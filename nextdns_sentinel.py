@@ -938,6 +938,9 @@ class Store:
                 ),
             )
 
+    def telegram_destinations(self) -> list[dict[str, Any]]:
+        return [bot for bot in self.telegram_bots() if bot.get("enabled") and bot.get("token") and bot.get("chat_id")]
+
     def telegram_bots(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory=sqlite3.Row
@@ -2332,9 +2335,18 @@ class Sentinel:
             except ValueError:
                 stamp=event_time
             lines.append(f"<b>Time:</b> {html_escape(stamp)}")
+        message="\n".join(lines)
+        destinations=self.store.telegram_destinations()
+        if destinations:
+            delivered=False
+            for bot in destinations:
+                ok,reason=send_telegram_result(bot["token"],bot["chat_id"],message,parse_mode="HTML")
+                self.store.mark_telegram_bot_result(int(bot["id"]),ok,"" if ok else reason)
+                delivered=delivered or ok
+            return delivered
         if not self.telegram_token or not self.telegram_chat_id:
             return False
-        return send_telegram(self.telegram_token, self.telegram_chat_id, "\n".join(lines))
+        return send_telegram(self.telegram_token, self.telegram_chat_id, message)
     
     def notify_report(self, title: str, lines: list[str], alert_id: int | None = None) -> bool:
         if alert_id and self.features:
@@ -2374,7 +2386,7 @@ class Sentinel:
         # Retries are independent from DNS polling so a recovered Telegram bot
         # receives queued alerts immediately.
         while self.stop_event is not None and not self.stop_event.is_set():
-            if not self.telegram_token or not self.telegram_chat_id:
+            if not self.store.telegram_destinations() and (not self.telegram_token or not self.telegram_chat_id):
                 self.stop_event.wait(1)
                 continue
             try:
@@ -2798,9 +2810,10 @@ DASHBOARD = """<!doctype html>
 <div class="panel">
 <h2>Telegram Alerts</h2>
 <form id="telegram-form">
+<label>Bot name<input name="name" placeholder="Primary Bot"></label>
 <label>Bot token<input name="token" type="password" placeholder="123456:ABC..."></label>
 <label>Chat ID<input name="chat_id" placeholder="Telegram chat ID"></label>
-<button class="start" type="submit">Save Telegram</button>
+<button class="start" type="submit">Add / Save Bot</button>
 <button class="neutral" type="button" onclick="testTelegram()">Send Test</button>
 <button class="start" type="button" onclick="enableTelegram()">Enable</button>
 <button class="stop" type="button" onclick="disableTelegram()">Disable</button>
@@ -2808,7 +2821,7 @@ DASHBOARD = """<!doctype html>
 <button class="neutral" type="button" onclick="editTelegram()">Edit Bot</button>
 </form>
 <div class="status" id="telegram-status">Checking...</div>
-<div class="mini-list" id="telegram-bot-card"><div class="muted">Loading Telegram bot identity...</div></div>
+<div class="mini-list" id="telegram-bot-card"><div class="muted">Loading Telegram bots...</div></div>
 <div id="telegram-editor" class="editor hidden">
 <strong>Edit Telegram Bot</strong>
 <form id="telegram-edit-form">
@@ -3170,6 +3183,15 @@ document.getElementById('telegram-form').addEventListener('submit',async e=>{
  try{await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});setText('telegram-status','Telegram configured and encrypted locally.','ok');e.target.reset();refresh();}
  catch(err){setText('telegram-status',err.message,'error');}
 });
+async function toggleTelegramBot(id,enabled){try{await api('/api/settings/telegram/bots/'+id+'/enable',{method:'POST',body:JSON.stringify({enabled})});await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
+async function testTelegramBot(id){try{await api('/api/settings/telegram/bots/'+id+'/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
+async function deleteTelegramBot(id){if(!confirm('Delete this Telegram bot?'))return;try{await api('/api/settings/telegram/bots/'+id,{method:'DELETE'});setText('telegram-status','Telegram bot deleted.','muted');await refresh();}catch(e){setText('telegram-status',e.message,'error');}}
+async function editTelegramBot(id){
+ try{const bots=await api('/api/settings/telegram/bots');const bot=bots.find(x=>Number(x.id)===Number(id));if(!bot)throw new Error('Telegram bot not found.');
+  const form=document.getElementById('telegram-edit-form');form.dataset.botId=String(id);form.elements.chat_id.value=bot.chat_id||'';form.elements.token.value='';
+  document.getElementById('telegram-editor').classList.remove('hidden');setText('telegram-edit-message','Editing '+bot.name+'. Leave token blank to keep it.','muted');document.getElementById('telegram-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
+ }catch(e){setText('telegram-status',e.message,'error');}
+}
 async function deleteTelegramCredentials(){if(!confirm('Delete the saved Telegram bot token and chat ID from Sentinel?'))return;try{await api('/api/settings/telegram/credentials',{method:'DELETE'});setText('telegram-status','Telegram credentials deleted.','muted');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
 async function testTelegram(){try{await api('/api/settings/telegram/test',{method:'POST'});setText('telegram-status','Test notification sent.','ok');}catch(e){setText('telegram-status',e.message,'error');}}
 async function enableTelegram(){try{const d=await api('/api/settings/telegram/enable',{method:'POST'});setText('telegram-status','Enabled · '+(d.status||'ready'),'ok');refresh();}catch(e){setText('telegram-status',e.message,'error');}}
@@ -3424,7 +3446,20 @@ async function refresh(){
   try{
   const tg=await api('/api/settings/telegram');
   setText('telegram-status',tg.enabled?'Enabled · @'+(tg.bot_username||'bot')+' · '+(tg.chat_title||tg.chat_id):(tg.configured?'Disabled · Saved bot available to enable.':'Disabled · No Telegram bot configured.'),tg.enabled?'ok':'muted');
-  const botCard=document.getElementById('telegram-bot-card');if(botCard){botCard.replaceChildren();const item=document.createElement('div');item.className='mini-item';const label=document.createElement('strong');label.textContent=tg.configured?'Configured Telegram Bot':'No Telegram Bot';const detail=document.createElement('span');detail.textContent=tg.configured?('@'+(tg.bot_username||'unknown')+' · '+(tg.bot_name||'Unnamed')+' · '+(tg.chat_title||tg.chat_id||'chat')):'Add a bot token and chat ID, then use Send Test.';item.append(label,detail);botCard.append(item);}
+  const botCard=document.getElementById('telegram-bot-card');if(botCard){
+   botCard.replaceChildren();const bots=await api('/api/settings/telegram/bots');
+   if(!bots.length){const empty=document.createElement('div');empty.className='muted';empty.textContent='No Telegram bots configured.';botCard.append(empty);}
+   for(const bot of bots){
+    const item=document.createElement('div');item.className='account';const info=document.createElement('div');
+    const title=document.createElement('strong');title.textContent=bot.name+' · '+(bot.bot_username?'@'+bot.bot_username:'unknown');
+    const detail=document.createElement('div');detail.className='muted';detail.textContent=(bot.enabled?'Working':'Disabled')+' · '+(bot.chat_title||bot.chat_id||'chat')+' · Last sent: '+formatDateTime(bot.last_notification_at)+(bot.last_error?' · Error: '+bot.last_error:'');info.append(title,detail);
+    const actions=document.createElement('div');actions.className='actions';
+    const toggle=document.createElement('button');toggle.className=bot.enabled?'stop':'start';toggle.textContent=bot.enabled?'Disable':'Enable';toggle.onclick=()=>toggleTelegramBot(bot.id,!bot.enabled);
+    const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=()=>editTelegramBot(bot.id);
+    const test=document.createElement('button');test.className='neutral';test.textContent='Test';test.onclick=()=>testTelegramBot(bot.id);
+    const del=document.createElement('button');del.className='stop';del.textContent='Delete';del.onclick=()=>deleteTelegramBot(bot.id);actions.append(toggle,edit,test,del);item.append(info,actions);botCard.append(item);
+   }
+  }
  }catch(e){setText('telegram-status','Telegram status error: '+e.message,'error');}
   const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
   const cards=[
@@ -4234,6 +4269,53 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             return jsonify({"configured": True, "status": "enabled", "bot_username": str(identity["bot"].get("username") or ""), "bot_name": str(identity["bot"].get("first_name") or ""), "chat_title": str(identity["chat"].get("title") or identity["chat"].get("first_name") or identity["chat"].get("username") or "")})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/settings/telegram/bots")
+    def api_telegram_bots_get() -> Any:
+        return jsonify([{"id":b["id"],"name":b["name"],"enabled":bool(b["enabled"]),"bot_username":b["bot_username"],
+                        "bot_name":b["bot_name"],"chat_title":b["chat_title"],"chat_id":b["chat_id"],
+                        "last_notification_at":b["last_notification_at"],"last_error":b["last_error"],
+                        "token_configured":bool(b["token"])} for b in store.telegram_bots()])
+
+    @app.post("/api/settings/telegram/bots")
+    def api_telegram_bot_save() -> Any:
+        data=request_json()
+        try: bot_id=int(data["id"]) if data.get("id") is not None else None
+        except (TypeError,ValueError): return jsonify({"error":"Bot id must be an integer."}),400
+        name=str(data.get("name") or "Telegram Bot").strip(); token=str(data.get("token") or "").strip(); chat_id=str(data.get("chat_id") or "").strip()
+        if bot_id:
+            existing=next((b for b in store.telegram_bots() if int(b["id"])==bot_id),None)
+            if not existing: return jsonify({"error":"Telegram bot not found."}),404
+            token=token or existing["token"]; chat_id=chat_id or existing["chat_id"]
+        if not token or not chat_id: return jsonify({"error":"Telegram bot token and chat ID are required."}),400
+        try:
+            identity=validate_telegram_credentials(token,chat_id)
+            saved_id=store.save_telegram_bot(bot_id,name,token,chat_id,bool(data.get("enabled",True)),identity)
+            features.audit("telegram_bot_save","telegram_bot",str(saved_id),details={"name":name})
+            return jsonify({"saved":True,"id":saved_id})
+        except Exception as exc: return jsonify({"error":str(exc)}),400
+
+    @app.post("/api/settings/telegram/bots/<int:bot_id>/enable")
+    def api_telegram_bot_enable(bot_id:int) -> Any:
+        enabled=bool(request_json().get("enabled"))
+        if not store.set_telegram_bot_enabled(bot_id,enabled): return jsonify({"error":"Telegram bot not found."}),404
+        features.audit("telegram_bot_enable" if enabled else "telegram_bot_disable","telegram_bot",str(bot_id))
+        return jsonify({"enabled":enabled})
+
+    @app.post("/api/settings/telegram/bots/<int:bot_id>/test")
+    def api_telegram_bot_test(bot_id:int) -> Any:
+        bot=next((b for b in store.telegram_bots() if int(b["id"])==bot_id),None)
+        if not bot: return jsonify({"error":"Telegram bot not found."}),404
+        ok,reason=send_telegram_result(bot["token"],bot["chat_id"],"<b>NextDNS Sentinel</b>\nTest notification.",parse_mode="HTML")
+        store.mark_telegram_bot_result(bot_id,ok,"" if ok else reason)
+        if not ok: return jsonify({"error":reason}),502
+        return jsonify({"sent":True,"message":reason,"sent_at":utc_now()})
+
+    @app.delete("/api/settings/telegram/bots/<int:bot_id>")
+    def api_telegram_bot_delete(bot_id:int) -> Any:
+        if not store.delete_telegram_bot(bot_id): return jsonify({"error":"Telegram bot not found."}),404
+        features.audit("telegram_bot_delete","telegram_bot",str(bot_id))
+        return jsonify({"deleted":True})
 
     @app.get("/api/settings/telegram")
     def api_telegram_get() -> Any:

@@ -3795,12 +3795,10 @@ function dashboardBoot(){
   catch(error){console.error('Dashboard boot step failed:',name,error);showDashboardError(name+': '+dashboardErrorMessage(error));}
  }
  try{window.addEventListener('resize',detectDevice);}catch(error){console.error(error);}
- if(window.__sentinelRefreshTimer)clearInterval(window.__sentinelRefreshTimer);
- window.__sentinelRefreshTimer=setInterval(()=>{
-  Promise.resolve().then(()=>refresh()).catch(error=>showDashboardError('Refresh failed: '+dashboardErrorMessage(error)));
-  Promise.resolve().then(()=>loadConfigChanges()).catch(error=>console.error('Config refresh failed:',error));
-  Promise.resolve().then(()=>loadControlCenter()).catch(error=>console.error('Control Center refresh failed:',error));
- },5000);
+ if(window.__sentinelRefreshTimer){
+  clearInterval(window.__sentinelRefreshTimer);
+  window.__sentinelRefreshTimer=null;
+ }
 }
 window.addEventListener('error',event=>{
  const message=event?.error?.message||event?.message;

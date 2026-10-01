@@ -1154,7 +1154,27 @@ class Store:
     def device_states(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory=sqlite3.Row
-            return [dict(r) for r in db.execute("SELECT profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at,inactive_alerted_at FROM device_state ORDER BY device_name,device_id")]
+            rows=[dict(r) for r in db.execute("""
+                SELECT d.*,
+                       a.name AS account_name,
+                       (SELECT COUNT(*) FROM alerts al WHERE al.profile_id=d.profile_id AND al.device_id=d.device_id) AS alert_count,
+                       (SELECT COUNT(*) FROM denylist dl WHERE dl.profile_id=d.profile_id) AS denylist_count,
+                       (SELECT COUNT(*) FROM alerts al WHERE al.profile_id=d.profile_id AND al.device_id=d.device_id AND al.alert_type='denylist_match') AS blocked_count
+                FROM device_state d
+                LEFT JOIN accounts a ON a.profile_id=d.profile_id
+                ORDER BY a.name,d.device_name,d.device_id
+            """)]
+            return rows
+
+    def update_device_properties(self, profile_id: str, device_id: str, data: dict[str, Any]) -> bool:
+        allowed={"device_name","device_model","client_ip","last_seen_at","last_status","last_domain","inactive_alerted_at"}
+        fields=[key for key in data if key in allowed]
+        if not fields:return False
+        assignments=",".join(f"{key}=?" for key in fields)
+        values=[str(data[key] or "") for key in fields]+[utc_now(),profile_id,device_id]
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute(f"UPDATE device_state SET {assignments},updated_at=? WHERE profile_id=? AND device_id=?",values)
+            return cur.rowcount>0
 
     def accounts(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -2761,6 +2781,14 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="panel"><div class="section-head"><div><h2>Device Activity</h2><div class="muted">Last observed DNS activity; inactivity does not prove DNS was disabled.</div></div><span id="device-count" class="pill">0 devices</span></div><div id="device-activity" class="device-state"><div class="muted">Loading...</div></div></div>
+<div id="device-editor" class="panel hidden"><h3>Edit Device</h3><form id="device-edit-form">
+<input type="hidden" name="profile_id"><input type="hidden" name="device_id">
+<label>Device Name<input name="device_name"></label><label>Device Model<input name="device_model"></label>
+<label>Client IP<input name="client_ip"></label><label>Last Seen At<input name="last_seen_at"></label>
+<label>Status<input name="last_status"></label><label>Last Domain<input name="last_domain"></label>
+<label>Inactive Alerted At<input name="inactive_alerted_at"></label>
+<button class="start" type="submit">Save Device</button><button class="neutral" type="button" onclick="closeDeviceEditor()">Cancel</button>
+</form><div class="status" id="device-edit-message"></div></div>
 <div class="panel">
 <div class="section-head"><div><h2>Event Timeline</h2><div class="muted">Latest monitor and alert activity</div></div><span id="timeline-count" class="pill">0 events</span></div>
 <div id="event-timeline" class="timeline"><div class="muted">Loading...</div></div>
@@ -2960,6 +2988,17 @@ function renderIntelligence(data){
  const risks=(data?.intelligence?.domain_risk||[]).map(x=>x.domain_risk+': '+x.count).join(' · ');
  setText('domain-risk',risks||'None','');
 }
+function editDevice(device){
+ const form=document.getElementById('device-edit-form');if(!form)return;
+ for(const field of ['profile_id','device_id','device_name','device_model','client_ip','last_seen_at','last_status','last_domain','inactive_alerted_at'])if(form.elements[field])form.elements[field].value=device[field]||'';
+ document.getElementById('device-editor').classList.remove('hidden');setText('device-edit-message','Editing local device state.','muted');document.getElementById('device-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function closeDeviceEditor(){document.getElementById('device-editor').classList.add('hidden');document.getElementById('device-edit-form').reset();setText('device-edit-message','','');}
+document.getElementById('device-edit-form')?.addEventListener('submit',async e=>{
+ e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());const profileId=d.profile_id,deviceId=d.device_id;delete d.profile_id;delete d.device_id;
+ try{await api('/api/devices/'+encodeURIComponent(profileId)+'/'+encodeURIComponent(deviceId),{method:'PATCH',body:JSON.stringify(d)});closeDeviceEditor();await refresh();setText('device-edit-message','Device updated successfully.','ok');}
+ catch(err){setText('device-edit-message','Save failed: '+err.message,'error');}
+});
 async function loadDeviceDetail(profileId,deviceId){
  try{
   const d=await api('/api/devices/'+encodeURIComponent(profileId)+'/'+encodeURIComponent(deviceId));
@@ -3080,17 +3119,21 @@ function renderDevices(items){
  if(!items?.length){box.textContent='No DNS activity has been observed yet.';return;}
  const now=Date.now();
  for(const x of items){
-  const c=document.createElement('div');c.className='device-item';
-  c.style.cursor='pointer';c.title='Open device investigation details';
-  c.onclick=()=>loadDeviceDetail(x.profile_id,x.device_id);
-  const n=document.createElement('div');n.className='name';n.textContent=x.device_name||x.device_id||'Unidentified device';
+  const c=document.createElement('div');c.className='device-item';const n=document.createElement('div');n.className='name';n.textContent=x.device_name||x.device_id||'Unidentified device';
+  const profile=document.createElement('div');profile.className='line';profile.innerHTML='<span>Profile</span><span></span>';profile.lastChild.textContent=x.account_name||x.profile_id;
   const last=x.last_seen_at?new Date(x.last_seen_at).getTime():0;const active=last&&now-last<=180000;
-  const l=document.createElement('div');l.className='line';l.innerHTML='<span>Activity</span><strong></strong>';l.lastChild.textContent=active?'Active recently':'No recent DNS activity';l.lastChild.className=active?'ok':'error';
-  const t=document.createElement('div');t.className='line';t.innerHTML='<span>Last seen</span><span></span>';t.lastChild.textContent=formatDateTime(x.last_seen_at);
-  const m=document.createElement('div');m.className='line';m.innerHTML='<span>Model</span><span></span>';m.lastChild.textContent=x.device_model||'—';
-  c.append(n,l,t,m);box.append(c);
+  const l=document.createElement('div');l.className='line';l.innerHTML='<span>Status</span><strong></strong>';l.lastChild.textContent=x.last_status|| (active?'Active recently':'No recent DNS activity');l.lastChild.className=active?'ok':'error';
+  const ip=document.createElement('div');ip.className='line';ip.innerHTML='<span>Client IP</span><span></span>';ip.lastChild.textContent=x.client_ip||'—';
+  const domain=document.createElement('div');domain.className='line';domain.innerHTML='<span>Last domain</span><span></span>';domain.lastChild.textContent=x.last_domain||'—';
+  const alerts=document.createElement('div');alerts.className='line';alerts.innerHTML='<span>Alerts / blocked</span><span></span>';alerts.lastChild.textContent=String(x.alert_count||0)+' / '+String(x.blocked_count||0);
+  const deny=document.createElement('div');deny.className='line';deny.innerHTML='<span>Profile denylist</span><span></span>';deny.lastChild.textContent=String(x.denylist_count||0)+' entries';
+  const time=document.createElement('div');time.className='line';time.innerHTML='<span>Last seen</span><span></span>';time.lastChild.textContent=formatDateTime(x.last_seen_at);
+  const actions=document.createElement('div');const detail=document.createElement('button');detail.className='neutral';detail.textContent='Details';detail.onclick=()=>loadDeviceDetail(x.profile_id,x.device_id);
+  const edit=document.createElement('button');edit.className='neutral';edit.textContent='Edit';edit.onclick=e=>{e.stopPropagation();editDevice(x);};actions.append(detail,edit);
+  c.append(n,profile,l,ip,domain,alerts,deny,time,actions);box.append(c);
  }
 }
+
 function renderProfileHealth(items){
  const box=document.getElementById('profile-health');box.replaceChildren();
  setText('health-count',(items||[]).length+' profiles','');
@@ -3893,6 +3936,14 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.get("/api/devices/<profile_id>/<path:device_id>")
     def api_device_detail(profile_id:str,device_id:str) -> Any:
         return jsonify(features.device_detail(profile_id,device_id))
+
+    @app.patch("/api/devices/<profile_id>/<path:device_id>")
+    def api_device_update(profile_id:str,device_id:str) -> Any:
+        data=request_json()
+        if not store.update_device_properties(profile_id,device_id,data):
+            return jsonify({"error":"No valid device properties were provided or device was not found."}),400
+        features.audit("device_update","device",device_id,profile_id,{"fields":sorted(data)})
+        return jsonify({"updated":True,"device":next((d for d in store.device_states() if d["profile_id"]==profile_id and d["device_id"]==device_id),{})})
 
     @app.get("/api/export/json")
     def api_export_json() -> Any:

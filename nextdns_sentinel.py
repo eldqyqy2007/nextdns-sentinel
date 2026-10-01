@@ -3066,15 +3066,15 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.before_request
     def safe_mode_guard():
-        if request.path.startswith("/api/") and features.setting("api_auth_hash",""):
+        if request.path.startswith("/api/") and store.setting("api_auth_hash",""):
             if request.path not in {"/api/auth/status","/api/auth/login","/api/auth/configure"} and not session.get("sentinel_authenticated"):
                 token=request.headers.get("Authorization","")
                 supplied=token[7:] if token.lower().startswith("bearer ") else ""
-                if not supplied or not hashlib.sha256(supplied.encode()).hexdigest()==features.setting("api_auth_hash",""):
+                if not supplied or not hashlib.sha256(supplied.encode()).hexdigest()==store.setting("api_auth_hash",""):
                     return jsonify({"error":"Sentinel API authentication required."}),401
         if request.path.startswith("/api/") and request.method in {"POST","PATCH","DELETE"}:
             protected=("/api/denylist","/api/config-changes/","/api/profiles/")
-            if features.setting("safe_mode","0")=="1" and request.path.startswith(protected):
+            if store.setting("safe_mode","0")=="1" and request.path.startswith(protected):
                 if request.path=="/api/profiles/discover":
                     return None
                 return jsonify({"error":"Safe Mode is enabled. NextDNS configuration changes are blocked until Safe Mode is disabled."}),423
@@ -3082,15 +3082,15 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/auth/status")
     def api_auth_status() -> Any:
-        return jsonify({"enabled":bool(features.setting("api_auth_hash","")),"authenticated":bool(session.get("sentinel_authenticated"))})
+        return jsonify({"enabled":bool(store.setting("api_auth_hash","")),"authenticated":bool(session.get("sentinel_authenticated"))})
 
     @app.post("/api/auth/configure")
     def api_auth_configure() -> Any:
-        if features.setting("api_auth_hash","") and not session.get("sentinel_authenticated"):
+        if store.setting("api_auth_hash","") and not session.get("sentinel_authenticated"):
             return jsonify({"error":"Authentication is already configured."}),403
         token=str(request_json().get("token","")).strip()
         if len(token)<16: return jsonify({"error":"Use an API token with at least 16 characters."}),400
-        features.set_setting("api_auth_hash",hashlib.sha256(token.encode()).hexdigest())
+        store.set_setting("api_auth_hash",hashlib.sha256(token.encode()).hexdigest())
         session["sentinel_authenticated"]=True
         features.audit("api_auth_configure","security","api",details={"enabled":True})
         return jsonify({"enabled":True,"authenticated":True})
@@ -3098,7 +3098,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.post("/api/auth/login")
     def api_auth_login() -> Any:
         token=str(request_json().get("token","")).strip()
-        expected=features.setting("api_auth_hash","")
+        expected=store.setting("api_auth_hash","")
         if not expected or hashlib.sha256(token.encode()).hexdigest()!=expected:
             return jsonify({"error":"Invalid API token."}),401
         session["sentinel_authenticated"]=True
@@ -3737,8 +3737,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         return jsonify({
             "rules": features.rules(),
             "maintenance": features.maintenance_active(),
-            "safe_mode": features.setting("safe_mode","0")=="1",
-            "api_auth": bool(features.setting("api_auth_token","")),
+            "safe_mode": store.setting("safe_mode","0")=="1",
+            "api_auth": bool(store.setting("api_auth_token","")),
             "diagnostics": features.diagnostics(),
             "rate_limits": features.rate_limit_history(20),
         })
@@ -3779,7 +3779,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.post("/api/safe-mode")
     def api_safe_mode()->Any:
-        enabled=bool(request_json().get("enabled")); features.set_setting("safe_mode","1" if enabled else "0")
+        enabled=bool(request_json().get("enabled")); store.set_setting("safe_mode","1" if enabled else "0")
         features.audit("safe_mode","settings","safe_mode",details={"enabled":enabled})
         return jsonify({"enabled":enabled})
 

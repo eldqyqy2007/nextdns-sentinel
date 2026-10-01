@@ -2268,6 +2268,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not features.set_incident_status(incident_id,status):
             return jsonify({"error":"Invalid incident status or incident not found."}),400
         features.audit("incident_status","incident",str(incident_id),details={"status":status})
+        sentinel.notify_report("Incident status updated",[f"Incident: #{incident_id}",f"Status: {status.upper()}"])
         return jsonify({"updated":True,"status":status})
 
     @app.get("/api/audit")

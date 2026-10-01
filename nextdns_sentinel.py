@@ -1985,6 +1985,8 @@ def validate_telegram_credentials(token: str, chat_id: str) -> dict[str, Any]:
         raise RuntimeError("Telegram returned invalid JSON.") from exc
     if not data.get("ok"):
         raise RuntimeError("Telegram chat ID could not be validated.")
+    chat = data.get("result") if isinstance(data.get("result"), dict) else {}
+    return {"bot": bot, "chat": chat}
 
 
 def send_telegram(
@@ -2224,7 +2226,17 @@ class Sentinel:
                     encrypted=event_encrypted(log)
                     # Device state is updated from every DNS log, not only denylist matches.
                     if domain:
-                        self.store.update_device_state(profile_id,device_id,device_name,device_model,client_ip,event_time,status,domain)
+                        try:
+                            self.store.update_device_state(
+                                profile_id, device_id, device_name, device_model,
+                                client_ip, event_time, status, domain,
+                            )
+                        except sqlite3.Error as exc:
+                            # Device telemetry must never prevent denylist detection/alerting.
+                            logging.warning(
+                                "Device state update failed for %s/%s: %s",
+                                account["name"], device_id or "__UNIDENTIFIED__", exc,
+                            )
                     if not domain or not domain_matches(domain, denylist):
                         continue
 
@@ -3440,14 +3452,6 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 "added_at": account["added_at"],
             })
         return jsonify(accounts)
-
-    @app.get("/api/settings/telegram")
-    def api_telegram_settings() -> Any:
-        return jsonify({
-            "configured": bool(
-                sentinel.telegram_token and sentinel.telegram_chat_id
-            )
-        })
 
     @app.get("/api/settings/alert-logs")
     def api_alert_log_settings() -> Any:

@@ -2977,11 +2977,11 @@ async function refresh(){
 setupDashboardPages();showPage('overview');detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
 function setupDashboardPages(){
  const map={
-  overview:['stats','health','profile-health','event-timeline'],
+  overview:['stats','health','profile-health','event-timeline','hero-dot','runtime'],
   analytics:['alert-chart','risk-overview','sentinel-health'],
   devices:['device-activity'],
-  security:['incidents','domain-intelligence','global-search','operations-center'],
-  profiles:['account-form','config-changes','config-section','denylist'],
+  security:['incidents','domain-intelligence','global-search','operations-center','alerts','alert-search'],
+  profiles:['account-form','config-changes','config-section','denylist','deny-domain'],
   notifications:['telegram-form'],
   operations:['control-summary','rule-name','maintenance-seconds','control-details'],
   data:['restore-file','save-alert-logs']
@@ -2991,7 +2991,7 @@ function setupDashboardPages(){
 }
 function showPage(page){
  setupDashboardPages();
- document.querySelectorAll('.panel[data-page]').forEach(p=>{p.style.display=p.dataset.page===page?'block':'none'});
+ document.querySelectorAll('.panel[data-page]').forEach(p=>{p.style.display=p.dataset.page===page?'block':'none'});document.querySelectorAll('.panel[data-page=""]').forEach(p=>p.style.display='none');
  const stats=document.getElementById('stats');if(stats)stats.style.display=page==='overview'?'grid':'none';
  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
  if(page==='analytics'){loadRangeAnalytics();loadRiskBaseline();}
@@ -2999,7 +2999,7 @@ function showPage(page){
  if(page==='security'){loadIncidents();loadDomains();}
  if(page==='devices')refresh();
  if(page==='profiles')loadConfigChanges();
- if(page==='notifications')loadTelegram();
+
  if(page==='data')loadAlertLogSettings();
  if(window.innerWidth<=900)toggleSidebar(false);
 }

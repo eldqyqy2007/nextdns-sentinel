@@ -382,6 +382,14 @@ class FeatureStore:
             )
             return cur.rowcount > 0
 
+    def heartbeat(self, state: str = 'running', details: Any = None) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO sentinel_health(key,value,updated_at) VALUES('heartbeat',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (json.dumps({"state":state,"details":details or {}},ensure_ascii=False,default=str),now_iso()),
+            )
+
     def audit(self, action: str, target_type: str = '', target_id: str = '',
               profile_id: str = '', details: Any = None, success: bool = True,
               actor: str = 'sentinel') -> int:
@@ -479,7 +487,15 @@ class FeatureStore:
                 db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
                 for name in ('alert_metadata','incidents','audit_log','delivery_events','sentinel_health')
             )
-            return {"checks":checks,"healthy":all(checks.values()),"checked_at":now_iso()}
+            heartbeat=db.execute("SELECT updated_at,value FROM sentinel_health WHERE key='heartbeat'").fetchone()
+            heartbeat_age=None
+            if heartbeat:
+                try:
+                    heartbeat_age=(datetime.now(timezone.utc)-datetime.fromisoformat(str(heartbeat['updated_at']).replace('Z','+00:00'))).total_seconds()
+                except ValueError:
+                    heartbeat_age=None
+            checks['heartbeat']=heartbeat_age is not None and heartbeat_age < 120
+            return {"checks":checks,"healthy":all(checks.values()),"heartbeat_age_seconds":heartbeat_age,"checked_at":now_iso()}
 
     def export_json(self) -> dict[str, Any]:
         return {

@@ -1545,13 +1545,24 @@ class Store:
             status_counts[status_key] = status_counts.get(status_key, 0) + 1
             domain_key = str(domain or "unknown")
             domains[domain_key] = domains.get(domain_key, 0) + 1
-        top_domains = sorted(domains.items(), key=lambda item: (-item[1], item[0]))[:8]
-        return {
-            "timeline": [{"time": key, "count": value} for key, value in buckets.items()],
-            "statuses": status_counts,
-            "top_domains": [{"domain": key, "count": value} for key, value in top_domains],
-            "total_24h": len(rows),
-        }
+        top_domains = sorted(domains.items(), key=lambda item: (-item[1], item[0]))[:12]
+        profile_rows: dict[str, dict[str, Any]] = {}
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            detail_rows = db.execute("""SELECT a.profile_id,a.account_name,a.domain,a.status,a.alert_type,a.reason,a.device_name,a.device_id,a.event_timestamp,a.created_at,COALESCE(m.severity,'') severity,COALESCE(m.risk_score,0) risk_score,COALESCE(m.domain_risk,'') domain_risk FROM alerts a LEFT JOIN alert_metadata m ON m.alert_id=a.id WHERE ((a.event_timestamp>=? AND a.event_timestamp<>'') OR (a.event_timestamp='' AND a.created_at>=?)) ORDER BY COALESCE(NULLIF(a.event_timestamp,''),a.created_at) DESC""",(start_iso,start_iso)).fetchall()
+        for row in detail_rows:
+            pid=str(row["profile_id"] or "unknown")
+            item=profile_rows.setdefault(pid,{"profile_id":pid,"account_name":str(row["account_name"] or pid),"total_alerts":0,"blocked_count":0,"status_counts":{},"domains":{},"recent_events":[]})
+            item["total_alerts"]+=1
+            if str(row["alert_type"] or "")=="denylist_match": item["blocked_count"]+=1
+            sk=str(row["status"] or "unknown");item["status_counts"][sk]=item["status_counts"].get(sk,0)+1
+            dk=str(row["domain"] or "unknown");item["domains"][dk]=item["domains"].get(dk,0)+1
+            if len(item["recent_events"])<25:item["recent_events"].append(dict(row))
+        for item in profile_rows.values():
+            item["top_domains"]=[{"domain":k,"count":v} for k,v in sorted(item["domains"].items(),key=lambda x:(-x[1],x[0]))[:10]]
+            item["statuses"]=[{"status":k,"count":v} for k,v in sorted(item["status_counts"].items(),key=lambda x:(-x[1],x[0]))]
+            item.pop("domains",None);item.pop("status_counts",None)
+        return {"timeline":[{"time":key,"count":value} for key,value in buckets.items()],"statuses":status_counts,"top_domains":[{"domain":key,"count":value} for key,value in top_domains],"profiles":sorted(profile_rows.values(),key=lambda x:(-x["total_alerts"],x["account_name"].lower())),"total_24h":len(rows)}
 
     def monitor_health(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -2941,7 +2952,7 @@ DASHBOARD = """<!doctype html>
 </div>
 <div class="panel">
 <div class="section-head"><div><h2>Top Domains</h2><div class="muted">Most frequent recent alerts</div></div></div>
-<div id="top-domains" class="mini-list"><div class="muted">Loading...</div></div>
+<div id="top-domains" class="mini-list"><div class="muted">Loading...</div></div><div class="panel" style="margin-top:12px"><div class="section-head"><div><h2>Per-Profile Analytics</h2><div class="muted">Detailed activity for each monitored profile: blocked access, domains, status and recent events.</div></div><span id="analytics-profile-count" class="pill">0 profiles</span></div><div id="analytics-profiles" class="scalable-list"><div class="muted">Loading profile analytics...</div></div></div>
 </div>
 </div>
 
@@ -3159,6 +3170,7 @@ bindDashboardListener('restore-form','submit',async e=>{
 
 
 function renderAnalytics(data){
+ const profileBox=document.getElementById('analytics-profiles');const profiles=data.profiles||[];setText('analytics-profile-count',profiles.length+' profiles','');if(profileBox){profileBox.replaceChildren();if(!profiles.length){profileBox.textContent='No profile activity recorded in this range.';}else{for(const p of profiles){const card=document.createElement('details');card.className='account';const summary=document.createElement('summary');summary.style.cursor='pointer';summary.textContent=(p.account_name||p.profile_id)+' · '+p.total_alerts+' alerts · '+p.blocked_count+' blocked';card.append(summary);const body=document.createElement('div');body.className='mini-list';const stats=document.createElement('div');stats.className='meta';[['Total Alerts',p.total_alerts],['Blocked Sites',p.blocked_count],['Profile ID',p.profile_id]].forEach(([k,v])=>{const item=document.createElement('div');item.innerHTML='<strong></strong><span></span>';item.firstChild.textContent=k;item.lastChild.textContent=String(v);stats.append(item);});body.append(stats);const dh=document.createElement('div');dh.className='muted';dh.textContent='Top domains';body.append(dh);for(const d of p.top_domains||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=d.domain;row.lastChild.textContent=d.count;body.append(row);}const eh=document.createElement('div');eh.className='muted';eh.style.marginTop='8px';eh.textContent='Recent events';body.append(eh);for(const e of p.recent_events||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=(e.alert_type||'event')+' · '+(e.domain||e.reason||'No domain');row.lastChild.textContent=formatDateTime(e.event_timestamp||e.created_at);row.title=(e.reason||'')+' · '+(e.status||'');body.append(row);}card.append(body);profileBox.append(card);}}}
  const chart=document.getElementById('alert-chart');chart.replaceChildren();
  const points=data.timeline||[];const max=Math.max(1,...points.map(x=>x.count));
  for(const point of points){

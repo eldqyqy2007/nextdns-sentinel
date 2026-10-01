@@ -388,7 +388,8 @@ class Store:
                 ON CONFLICT(profile_id,device_id) DO UPDATE SET
                   device_name=excluded.device_name,device_model=excluded.device_model,
                   client_ip=excluded.client_ip,last_seen_at=CASE WHEN excluded.last_seen_at<>'' THEN excluded.last_seen_at ELSE device_state.last_seen_at END,
-                  last_status=excluded.last_status,last_domain=excluded.last_domain,updated_at=excluded.updated_at
+                  last_status=excluded.last_status,last_domain=excluded.last_domain,updated_at=excluded.updated_at,
+                  inactive_alerted_at=CASE WHEN excluded.last_seen_at<>'' THEN '' ELSE device_state.inactive_alerted_at END
             """,(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,utc_now()))
 
     def mark_device_inactive_alerted(self, profile_id: str, device_id: str) -> bool:
@@ -1313,7 +1314,7 @@ class Sentinel:
             severity = str(context.get("severity") or "medium").upper()
             risk = context.get("risk_score", "—")
             lines = [f"Severity: {severity} · Risk: {risk}/100", *lines]
-        message = "🛡️ NextDNS Sentinel\\n\\n" + title + "\\n" + "\\n".join(lines)
+        message = "🛡️ NextDNS Sentinel\n\n" + title + "\n" + "\n".join(lines)
         ok = send_telegram(self.telegram_token, self.telegram_chat_id, message) if self.telegram_token and self.telegram_chat_id else False
         if self.features and alert_id:
             self.features.delivery(alert_id, "telegram", "sent" if ok else "failed")
@@ -1394,19 +1395,21 @@ class Sentinel:
                 logs, checkpoint_ms = client.logs(profile_id, from_ms)
                 for log in logs:
                     domain = event_domain(log)
+                    status = event_status(log)
+                    event_time = event_timestamp(log)
+                    client_ip = event_client_ip(log)
+                    device_id,device_name,device_model=event_device(log)
+                    protocol=event_protocol(log)
+                    encrypted=event_encrypted(log)
+                    # Device state is updated from every DNS log, not only denylist matches.
+                    if domain:
+                        self.store.update_device_state(profile_id,device_id,device_name,device_model,client_ip,event_time,status,domain)
                     if not domain or not domain_matches(domain, denylist):
                         continue
 
                     key = event_key(profile_id, log)
                     matched = find_matching_domain(domain, denylist) or matched_domain(log)
-                    status = event_status(log)
                     reason = event_reason(log) or "Custom denylist match"
-                    client_ip = event_client_ip(log)
-                    event_time = event_timestamp(log)
-                    device_id,device_name,device_model=event_device(log)
-                    protocol=event_protocol(log)
-                    encrypted=event_encrypted(log)
-                    self.store.update_device_state(profile_id,device_id,device_name,device_model,client_ip,event_time,status,domain)
 
                     for device in self.store.device_states():
                         if device["profile_id"] != profile_id or not device["last_seen_at"] or device.get("inactive_alerted_at"):

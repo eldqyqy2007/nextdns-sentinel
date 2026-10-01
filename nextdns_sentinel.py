@@ -3016,7 +3016,7 @@ async function saveConfigSection(){
  const id=document.getElementById('config-profile').value;const section=document.getElementById('config-section').value;let data;
  try{data=JSON.parse(document.getElementById('config-json').value)}catch(e){setText('config-status','Invalid JSON.','error');return;}
  if(!confirm('Apply this configuration through the NextDNS API?'))return;
- try{await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});setText('config-status','Change applied successfully.','ok');loadConfigChanges();}catch(e){setText('config-status',e.message,'error');}
+ try{await api('/api/profiles/'+encodeURIComponent(id)+'/config/'+encodeURIComponent(section),{method:'PATCH',body:JSON.stringify(data)});setText('config-status','Change applied successfully.','ok');await refresh();await loadConfigChanges();await loadConfigSection();}catch(e){setText('config-status','Change failed: '+e.message,'error');}
 }
 async function loadAlertLogSettings(){
  try{
@@ -3078,12 +3078,15 @@ async function refresh(){
    }
    wrap.append(table);box.append(wrap);
   }
-  const cfgSelect=document.getElementById('config-profile');cfgSelect.replaceChildren();
-  const denySelect=document.getElementById('deny-profile');denySelect.replaceChildren();
+  const cfgSelect=document.getElementById('config-profile');const oldCfg=cfgSelect.value;cfgSelect.replaceChildren();
+  const denySelect=document.getElementById('deny-profile');const oldDeny=denySelect.value;denySelect.replaceChildren();
   for(const a of accounts){
    const o=document.createElement('option');o.value=a.profile_id;o.textContent=a.name+' · '+a.profile_name+' ('+a.profile_id+')';cfgSelect.append(o);
    const d=document.createElement('option');d.value=a.profile_id;d.textContent=a.name+' · '+a.profile_name+' ('+a.profile_id+')';denySelect.append(d);
   }
+  if(oldCfg && [...cfgSelect.options].some(o=>o.value===oldCfg))cfgSelect.value=oldCfg;
+  if(oldDeny && [...denySelect.options].some(o=>o.value===oldDeny))denySelect.value=oldDeny;
+  if(denySelect.value && localStorage.getItem('sentinel_active_page')==='profiles') await showSelectedDenylist();
   const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
   for(const x of alerts){

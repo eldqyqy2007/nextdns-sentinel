@@ -4037,7 +4037,7 @@ async function loadControlCenter(){
   for(const r of d.rules||[]){const x=document.createElement('div');x.className='mini-item';x.innerHTML='<span></span><button type="button" class="stop">Delete</button>';x.firstChild.textContent=r.name+' · '+(r.enabled?'Enabled':'Disabled');x.lastChild.onclick=async()=>{await api('/api/rules/'+r.id,{method:'DELETE'});loadControlCenter()};rl.append(x);}
  }catch(e){setText('control-summary',e.message,'error')}
 }
-async async function loadRangeAnalytics(){
+async function loadRangeAnalytics(){
  const h=document.getElementById('analytics-range').value;try{const d=await api('/api/analytics?hours='+h);renderAnalytics(d);renderIntelligence(d);}catch(e){setText('health',e.message,'error')}
 }
 async function saveRule(){

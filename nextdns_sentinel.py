@@ -15,6 +15,7 @@ import os
 import sqlite3
 import threading
 import time
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Any
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, send_file
 
 from sentinel_features import FeatureStore
 
@@ -1758,6 +1759,13 @@ DASHBOARD = """<!doctype html>
 </div>
 
 <div class="panel">
+<div class="section-head"><div><h2>Export & Backup</h2><div class="muted">Export investigation data or create a full SQLite backup</div></div></div>
+<div class="row"><button class="neutral" onclick="exportJson()">Export JSON</button><button class="neutral" onclick="exportCsv()">Export CSV</button><button class="neutral" onclick="downloadBackup()">Download SQLite Backup</button></div>
+<form id="restore-form" style="margin-top:8px"><label>Restore SQLite backup</label><input id="restore-file" type="file" accept=".db,.sqlite,.sqlite3"><button class="stop" type="submit">Restore Backup</button></form>
+<div class="status" id="restore-status">Restoring replaces the current local database. Keep a backup first.</div>
+</div>
+
+<div class="panel">
 <h2>Alert Log Storage</h2>
 <label class="row"><input id="save-alert-logs" type="checkbox" style="width:auto;margin:0 8px 0 0"> Save Recent Alerts to file automatically</label>
 <p class="muted">Alerts are also kept in SQLite. When enabled, each new alert is appended immediately to <code>data/recent_alerts.jsonl</code>.</p>
@@ -1836,6 +1844,14 @@ function renderOperationList(items){
 }
 function exportJson(){window.open('/api/export/json','_blank');}
 function exportCsv(){window.open('/api/export/csv','_blank');}
+function downloadBackup(){window.open('/api/backup','_blank');}
+document.getElementById('restore-form').addEventListener('submit',async e=>{
+ e.preventDefault();const file=document.getElementById('restore-file').files[0];if(!file){setText('restore-status','Select a backup file first.','error');return;}
+ if(!confirm('Restore this SQLite backup? Current local data will be replaced.'))return;
+ const form=new FormData();form.append('backup',file);
+ try{await api('/api/restore',{method:'POST',body:form,headers:{}});setText('restore-status','Backup restored successfully.','ok');refresh();}catch(err){setText('restore-status',err.message,'error');}
+});
+
 
 function renderAnalytics(data){
  const chart=document.getElementById('alert-chart');chart.replaceChildren();
@@ -2271,6 +2287,42 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         from flask import Response
         return Response(features.export_csv(),mimetype="text/csv",
                         headers={"Content-Disposition":"attachment; filename=nextdns-sentinel-alerts.csv"})
+
+    @app.get("/api/backup")
+    def api_backup() -> Any:
+        if not DB_PATH.exists():
+            return jsonify({"error":"Database file does not exist yet."}),404
+        return send_file(DB_PATH,as_attachment=True,download_name="nextdns-sentinel-backup.db")
+
+    @app.post("/api/restore")
+    def api_restore() -> Any:
+        upload=request.files.get("backup")
+        if upload is None or not upload.filename:
+            return jsonify({"error":"Select a SQLite backup file."}),400
+        temp_path=None
+        was_running=sentinel.is_running()
+        try:
+            with tempfile.NamedTemporaryFile(prefix="sentinel-restore-",suffix=".db",delete=False) as tmp:
+                temp_path=Path(tmp.name)
+                upload.save(tmp)
+            with sqlite3.connect(temp_path) as source:
+                source.execute("PRAGMA integrity_check")
+                with sqlite3.connect(DB_PATH) as dest:
+                    source.backup(dest)
+            if was_running:
+                sentinel.stop()
+                sentinel.start()
+            features.heartbeat("restored")
+            features.audit("database_restore","database",str(DB_PATH),details={"filename":upload.filename})
+            return jsonify({"restored":True,"running":sentinel.is_running()})
+        except sqlite3.Error as exc:
+            return jsonify({"error":f"Invalid SQLite backup: {exc}"}),400
+        except Exception as exc:
+            return jsonify({"error":str(exc)}),400
+        finally:
+            if temp_path:
+                try: temp_path.unlink(missing_ok=True)
+                except OSError: pass
 
     @app.get("/api/sentinel/health")
     def api_sentinel_health() -> Any:

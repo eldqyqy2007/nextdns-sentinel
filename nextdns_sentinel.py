@@ -2865,11 +2865,12 @@ function renderProfileHealth(items){
   const name=document.createElement('div');name.className='name';name.textContent=item.name||item.profile_id;
   const status=document.createElement('div');status.className='line';
   const label=document.createElement('span');label.textContent=item.active?'Monitoring enabled':'Disabled';
-  const value=document.createElement('strong');value.className=item.last_error?'error':(item.active?'ok':'muted');value.textContent=item.last_error?'Error':(item.active?'Healthy':'Idle');
+  const value=document.createElement('strong');value.className=item.status==='degraded'?'error':(item.status==='healthy'?'ok':'muted');value.textContent=item.status==='degraded'?'Degraded':(item.status==='healthy'?'Healthy':(item.status==='disabled'?'Disabled':'Starting'));
   status.append(label,value);
   const poll=document.createElement('div');poll.className='line';poll.innerHTML='<span>Last success</span><span></span>';poll.lastChild.textContent=formatDateTime(item.last_success_at);
+  const failures=document.createElement('div');failures.className='line';failures.innerHTML='<span>Consecutive failures</span><span></span>';failures.lastChild.textContent=String(item.consecutive_failures||0);
   const err=document.createElement('div');err.className='line';err.innerHTML='<span>Last error</span><span></span>';err.lastChild.textContent=item.last_error?formatDateTime(item.last_error_at):'None';
-  card.append(name,status,poll,err);box.append(card);
+  card.append(name,status,poll,failures,err);box.append(card);
  }
 }
 function renderTimeline(health,alerts){

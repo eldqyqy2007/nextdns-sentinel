@@ -641,37 +641,29 @@ class NextDNSClient:
 
 
     def denylist(self, profile_id: str) -> list[str]:
-        domains: list[str] = []
-        cursor: str | None = None
-
-        seen_cursors: set[str] = set()
-        while True:
-            if cursor:
-                if cursor in seen_cursors:
-                    raise NextDNSError(
-                        f"NextDNS denylist pagination repeated cursor for profile {profile_id}."
-                    )
-                seen_cursors.add(cursor)
-            params: dict[str, Any] = {"limit": 100}
-            if cursor:
-                params["cursor"] = cursor
-
-            response = self._get(f"/profiles/{profile_id}/denylist", params=params)
-            for item in response.get("data", []):
-                if not isinstance(item, dict) or not item.get("active", True):
-                    continue
-                value = item.get("id") or item.get("domain") or item.get("name")
-                if value:
-                    domains.append(normalize_domain(str(value)))
-
-            cursor = (
-                response.get("meta", {})
-                .get("pagination", {})
-                .get("cursor")
+        # The current NextDNS API exposes the profile's denylist in the
+        # profile representation. Do not send unsupported query parameters
+        # such as "limit" to the /denylist child endpoint.
+        response = self._get(f"/profiles/{profile_id}")
+        profile = response.get("data", response)
+        if not isinstance(profile, dict):
+            raise NextDNSError(
+                f"NextDNS returned an unexpected profile response for {profile_id}."
             )
-            if not cursor:
-                break
 
+        entries = profile.get("denylist", [])
+        if not isinstance(entries, list):
+            raise NextDNSError(
+                f"NextDNS returned an unexpected denylist format for profile {profile_id}."
+            )
+
+        domains: list[str] = []
+        for item in entries:
+            if not isinstance(item, dict) or not item.get("active", True):
+                continue
+            value = item.get("id") or item.get("domain") or item.get("name")
+            if value:
+                domains.append(normalize_domain(str(value)))
         return domains
 
     def logs(self, profile_id: str, from_ms: int) -> tuple[list[dict[str, Any]], int]:

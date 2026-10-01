@@ -274,7 +274,10 @@ class Store:
                 VALUES(?,?,?,?)
                 ON CONFLICT(profile_id) DO UPDATE SET
                     last_poll_ms=excluded.last_poll_ms,
-                    last_success_at=excluded.last_success_at,
+                    last_success_at=CASE
+                        WHEN excluded.last_error='' THEN excluded.last_success_at
+                        ELSE monitor_state.last_success_at
+                    END,
                     last_error=excluded.last_error
                 """,
                 (profile_id, last_poll_ms, utc_now() if not error else "", error),

@@ -421,7 +421,7 @@ class Store:
                 for r in db.execute(
                     """
                     SELECT a.profile_id,a.name,a.active,
-                           s.last_poll_ms,s.last_success_at,s.last_error
+                           s.last_poll_ms,s.last_success_at,s.last_error,s.last_error_at
                     FROM accounts a
                     LEFT JOIN monitor_state s ON s.profile_id=a.profile_id
                     ORDER BY a.name
@@ -437,7 +437,9 @@ class Store:
                 dict(r)
                 for r in db.execute(
                     """
-                    SELECT account_name,domain,matched_domain,reason,status,client_ip,event_timestamp,created_at,notified_at
+                    SELECT account_name,domain,matched_domain,reason,status,client_ip,event_timestamp,
+                           created_at,notified_at,notification_status,notification_attempts,
+                           last_notification_attempt_at,next_retry_at
                     FROM alerts ORDER BY id DESC LIMIT ?
                     """,
                     (limit,),

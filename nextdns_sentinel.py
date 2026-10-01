@@ -645,7 +645,9 @@ class NextDNSClient:
         values: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
-            params: dict[str, Any] = {"limit": 100}
+            # /profiles currently rejects the documented pagination parameters
+            # in practice. Fetch the account profile collection without limit.
+            params: dict[str, Any] = {}
             if cursor:
                 params["cursor"] = cursor
             response = self._get("/profiles", params=params)

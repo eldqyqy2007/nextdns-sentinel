@@ -1405,6 +1405,20 @@ class Store:
             if before.get(key)!=after.get(key): diff.append({"field":key,"before":before.get(key),"after":after.get(key)})
         return {"profile_id":profile_id,"changed":bool(diff),"diff":diff,"change_type":row["change_type"],"created_at":row["created_at"],"undone_at":row["undone_at"]}
 
+    def risk_history(self, profile_id: str = "", days: int = 30) -> list[dict[str, Any]]:
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=max(1,min(365,int(days))))).isoformat()
+        with self._connect() as db:
+            if profile_id:
+                rows=db.execute("SELECT substr(a.created_at,1,10) day,AVG(m.risk_score) avg_risk,MAX(m.risk_score) max_risk,COUNT(*) alerts FROM alerts a JOIN alert_metadata m ON m.alert_id=a.id WHERE a.profile_id=? AND a.created_at>=? GROUP BY day ORDER BY day",(profile_id,cutoff)).fetchall()
+            else:
+                rows=db.execute("SELECT substr(a.created_at,1,10) day,AVG(m.risk_score) avg_risk,MAX(m.risk_score) max_risk,COUNT(*) alerts FROM alerts a JOIN alert_metadata m ON m.alert_id=a.id WHERE a.created_at>=? GROUP BY day ORDER BY day",(cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def baseline_view(self, profile_id: str = "") -> list[dict[str, Any]]:
+        with self._connect() as db:
+            if profile_id: rows=db.execute("SELECT bucket_hour,AVG(count) baseline,MAX(count) peak FROM anomaly_baseline WHERE profile_id=? GROUP BY bucket_hour ORDER BY bucket_hour",(profile_id,)).fetchall()
+            else: rows=db.execute("SELECT bucket_hour,AVG(count) baseline,MAX(count) peak FROM anomaly_baseline GROUP BY bucket_hour ORDER BY bucket_hour").fetchall()
+        return [dict(r) for r in rows]
     def live_snapshot(self) -> dict[str, Any]:
         return {"generated_at":now_iso(),"health":self.health(),"incidents":self.incidents(limit=10),"metrics":self.incident_metrics()}
 
@@ -2524,7 +2538,7 @@ DASHBOARD = """<!doctype html>
 <div class="panel"><h3>Alert Rules</h3><div class="row"><input id="rule-name" placeholder="Rule name"><input id="rule-json" placeholder='{"action":"suppress","domain":"example.com"}'><button class="start" onclick="saveRule()">Save Rule</button></div><div id="rules-list" class="mini-list"></div></div>
 <div class="panel"><h3>Maintenance / Suppression</h3><div class="row"><input id="maintenance-seconds" type="number" min="60" value="3600"><input id="maintenance-reason" placeholder="Reason"><button class="neutral" onclick="enableMaintenance()">Enable Maintenance</button></div><div class="row"><input id="suppression-fingerprint" placeholder="Fingerprint"><input id="suppression-seconds" type="number" min="30" value="600"><button class="neutral" onclick="addSuppression()">Suppress</button></div></div>
 </div>
-<div class="row"><button class="neutral" onclick="toggleSafeMode()">Toggle Safe Mode</button><button class="neutral" onclick="loadDiagnostics()">Diagnostics</button><button class="neutral" onclick="loadIncidentMetrics()">Incident Metrics</button><input id="retention-days" type="number" min="1" value="30" style="max-width:120px"><button class="neutral" onclick="runRetention()">Cleanup Database</button><button class="neutral" onclick="showConfigDiff()">Latest Config Diff</button><button class="neutral" onclick="loadRateLimits()">Rate Limits</button><input id="api-auth-token" type="password" placeholder="API token (16+ chars)"><button class="neutral" onclick="configureApiAuth()">Enable/Login API Auth</button><button class="neutral" onclick="logoutApiAuth()">Logout</button></div>
+<div class="row"><button class="neutral" onclick="toggleSafeMode()">Toggle Safe Mode</button><button class="neutral" onclick="loadDiagnostics()">Diagnostics</button><button class="neutral" onclick="loadIncidentMetrics()">Incident Metrics</button><input id="retention-days" type="number" min="1" value="30" style="max-width:120px"><button class="neutral" onclick="runRetention()">Cleanup Database</button><button class="neutral" onclick="showConfigDiff()">Latest Config Diff</button><button class="neutral" onclick="loadRiskBaseline()">Risk / Baseline</button><button class="neutral" onclick="loadRateLimits()">Rate Limits</button><input id="api-auth-token" type="password" placeholder="API token (16+ chars)"><button class="neutral" onclick="configureApiAuth()">Enable/Login API Auth</button><button class="neutral" onclick="logoutApiAuth()">Logout</button></div>
 <div id="control-details" class="mini-list"></div>
 </div>
 
@@ -2959,6 +2973,7 @@ async function refresh(){
  }catch(e){setText('health','Dashboard error: '+e.message,'error');}
 }
 detectDevice();window.addEventListener('resize',detectDevice);document.getElementById('alert-search').addEventListener('input',filterAlerts);loadAlertLogSettings();loadConfigChanges();loadControlCenter();refresh();setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
+async function loadRiskBaseline(){try{const [risk,base]=await Promise.all([api('/api/risk-history?days=30'),api('/api/baseline')]);const riskText=risk.slice(-10).map(x=>x.day+': avg '+Number(x.avg_risk||0).toFixed(1)+' · max '+x.max_risk+' · '+x.alerts+' alerts').join(' | ');const baseText=base.slice(0,12).map(x=>x.bucket_hour+':00 '+Number(x.baseline||0).toFixed(1)+' avg').join(' · ');setText('control-details','Risk history: '+(riskText||'No data')+' || Baseline: '+(baseText||'No data'),'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');}catch(e){setText('control-details',e.message,'error')}}
 async function showConfigDiff(){try{const accounts=await api('/api/accounts');if(!accounts.length){setText('control-details','No profiles configured.','muted');return}const d=await api('/api/config-diff/'+encodeURIComponent(accounts[0].profile_id));setText('control-details',d.changed?d.diff.map(x=>x.field+': '+JSON.stringify(x.before)+' → '+JSON.stringify(x.after)).join(' | '):'No recent configuration diff for '+accounts[0].profile_id,'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function configureApiAuth(){
@@ -3654,6 +3669,13 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             return jsonify({"error": "Telegram test notification failed."}), 502
         return jsonify({"sent": True})
 
+    @app.get("/api/risk-history")
+    def api_risk_history() -> Any:
+        return jsonify(features.risk_history(request.args.get("profile_id",""),int(request.args.get("days","30"))))
+
+    @app.get("/api/baseline")
+    def api_baseline() -> Any:
+        return jsonify(features.baseline_view(request.args.get("profile_id","")))
     @app.get("/api/live")
     def api_live() -> Any:
         return jsonify(features.live_snapshot())

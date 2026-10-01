@@ -3270,7 +3270,7 @@ function renderRecentAlerts(alerts){
   title.append(strong,sub);
   const actions=document.createElement('div');actions.className='recent-alert-actions';
   if(unseen){
-   const mark=document.createElement('button');mark.className='neutral';mark.textContent='Mark all seen';mark.onclick=()=>markRecentAccountSeen(profileId,recent.filter(x=>!x.seen_at).map(x=>x.id));actions.append(mark);
+   const mark=document.createElement('button');mark.className='neutral';mark.textContent='Mark all seen';mark.onclick=()=>markRecentAccountSeen(profileId,items.filter(x=>!x.seen_at).map(x=>x.id));actions.append(mark);
   }else{
    const seen=document.createElement('span');seen.className='recent-alert-seen';seen.textContent='✓ All seen';actions.append(seen);
   }
@@ -3324,19 +3324,9 @@ async function markRecentAccountSeen(profileId,ids){
  await refresh();
 }
 async function markAllRecentAlertsSeen(){
- const box=document.getElementById('recent-alerts');if(!box)return;
- const buttons=[...box.querySelectorAll('.recent-alert-item.unseen button')];
- if(!buttons.length){showActionToast('All recent alerts are already seen.','ok');return;}
- const ids=[];
- for(const row of box.querySelectorAll('.recent-alert-item.unseen')){
-  const textParts=[...row.querySelectorAll('.recent-alert-type,.recent-alert-detail')].map(e=>e.textContent).join(' ');
-  const alert=window.__recentAlertsCache?.find(x=>!x.seen_at&&(String(x.domain||'')+' '+String(x.reason||'')+' '+String(alertPresentation(x).label)).includes(textParts.split(' ')[0]||'__never__'));
-  if(alert)ids.push(alert.id);
- }
- const fallback=window.__recentAlertsCache?.filter(x=>!x.seen_at).map(x=>x.id)||[];
- const unique=[...new Set(ids.length?ids:fallback)];
- if(!unique.length){showActionToast('All recent alerts are already seen.','ok');return;}
- await Promise.all(unique.map(id=>api('/api/alerts/'+id+'/seen',{method:'POST',_skipAutoRefresh:true})));
+ const ids=window.__recentAlertsCache?.filter(x=>!x.seen_at).map(x=>x.id)||[];
+ if(!ids.length){showActionToast('All recent alerts are already seen.','ok');return;}
+ await Promise.all(ids.map(id=>api('/api/alerts/'+id+'/seen',{method:'POST',_skipAutoRefresh:true})));
  await refresh();
  showActionToast('All recent alerts marked as seen.','ok');
 }

@@ -3640,14 +3640,14 @@ function dashboardPagePanelIds(){
 function topLevelDashboardPanel(el){
  if(!el)return null;
  const main=document.querySelector('.app-content main');
- if(!main)return el.closest('.panel');
- let container=el.closest('.panel, .analytics, .grid');
- if(!container)return null;
- while(container.parentElement && container.parentElement!==main){
-  container=container.parentElement.closest('.panel, .analytics, .grid');
-  if(!container)break;
+ if(!main)return el.closest('.panel, .analytics, .grid');
+ let node=el;
+ while(node.parentElement && node.parentElement!==main){
+  node=node.parentElement;
  }
- return container;
+ if(node.parentElement!==main)return null;
+ if(!node.matches('.panel, .analytics, .grid'))return null;
+ return node;
 }
 function setupDashboardPages(){
  const map=dashboardPagePanelIds();

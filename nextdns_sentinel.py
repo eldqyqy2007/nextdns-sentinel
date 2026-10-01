@@ -30,7 +30,7 @@ from typing import Any
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, jsonify, render_template_string, request, send_file, session
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -2998,9 +2998,17 @@ def request_json() -> dict[str, Any]:
 
 def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flask:
     app = Flask(__name__)
+    app.secret_key = SECRET_KEY
+    app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
 
     @app.before_request
     def safe_mode_guard():
+        if request.path.startswith("/api/") and features.setting("api_auth_hash",""):
+            if request.path not in {"/api/auth/status","/api/auth/login","/api/auth/configure"} and not session.get("sentinel_authenticated"):
+                token=request.headers.get("Authorization","")
+                supplied=token[7:] if token.lower().startswith("bearer ") else ""
+                if not supplied or not hashlib.sha256(supplied.encode()).hexdigest()==features.setting("api_auth_hash",""):
+                    return jsonify({"error":"Sentinel API authentication required."}),401
         if request.path.startswith("/api/") and request.method in {"POST","PATCH","DELETE"}:
             protected=("/api/denylist","/api/config-changes/","/api/profiles/")
             if features.setting("safe_mode","0")=="1" and request.path.startswith(protected):
@@ -3008,6 +3016,35 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                     return None
                 return jsonify({"error":"Safe Mode is enabled. NextDNS configuration changes are blocked until Safe Mode is disabled."}),423
         return None
+
+    @app.get("/api/auth/status")
+    def api_auth_status() -> Any:
+        return jsonify({"enabled":bool(features.setting("api_auth_hash","")),"authenticated":bool(session.get("sentinel_authenticated"))})
+
+    @app.post("/api/auth/configure")
+    def api_auth_configure() -> Any:
+        if features.setting("api_auth_hash","") and not session.get("sentinel_authenticated"):
+            return jsonify({"error":"Authentication is already configured."}),403
+        token=str(request_json().get("token","")).strip()
+        if len(token)<16: return jsonify({"error":"Use an API token with at least 16 characters."}),400
+        features.set_setting("api_auth_hash",hashlib.sha256(token.encode()).hexdigest())
+        session["sentinel_authenticated"]=True
+        features.audit("api_auth_configure","security","api",details={"enabled":True})
+        return jsonify({"enabled":True,"authenticated":True})
+
+    @app.post("/api/auth/login")
+    def api_auth_login() -> Any:
+        token=str(request_json().get("token","")).strip()
+        expected=features.setting("api_auth_hash","")
+        if not expected or hashlib.sha256(token.encode()).hexdigest()!=expected:
+            return jsonify({"error":"Invalid API token."}),401
+        session["sentinel_authenticated"]=True
+        return jsonify({"authenticated":True})
+
+    @app.post("/api/auth/logout")
+    def api_auth_logout() -> Any:
+        session.pop("sentinel_authenticated",None)
+        return jsonify({"authenticated":False})
 
     @app.get("/")
     def index() -> str:

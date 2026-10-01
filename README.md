@@ -239,6 +239,16 @@ nextdns-sentinel/
 └── README.md
 ```
 
+## <img src="./assets/icons/limits.svg" alt="" width="24" height="24" align="absmiddle"> Limitations
+
+- NextDNS API availability and response format can change.
+- Polling is not a provider-side streaming connection.
+- Log polling uses the provider's paginated API with up to 1000 records per request and follows cursors when additional pages exist. Very high-volume profiles may still require a shorter interval.
+- SQLite is local persistence, not a distributed database.
+- Telegram is best-effort; monitoring continues if notification delivery fails.
+- Losing the Fernet key makes stored API keys unrecoverable.
+- The dashboard is lightweight and intentionally does not implement user authentication.
+
 ## <img src="./assets/icons/contributing.svg" alt="" width="24" height="24" align="absmiddle"> Contributing
 
 Issues and pull requests are welcome. Never include API keys, Telegram bot tokens, private chat IDs, private DNS logs, or sensitive profile information in issues or commits.

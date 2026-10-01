@@ -44,7 +44,7 @@ Sentinel is built for defensive visibility over NextDNS configurations you are a
 
 - **Multi-profile monitoring** with independent worker threads.
 - **Denylist matching** for exact domains, parent domains, and wildcard-style entries.
-- **Overlap-aware polling** with persistent last-poll state to reduce missed events between cycles.
+- **Overlap-aware polling** with a persistent checkpoint based on the completed API polling window to reduce missed events between cycles.
 - **Duplicate protection** using deterministic event fingerprints.
 - **Alert cooldown** to reduce repeated Telegram notifications for the same profile/domain.
 - **Richer event context** including status, reasons, matched domain, and client IP when supplied by NextDNS.
@@ -201,7 +201,7 @@ If you intentionally bind to a non-localhost address, add network controls/authe
 
 ## <img src="./assets/icons/dashboard.svg" alt="" width="24" height="24" align="absmiddle"> Web dashboard
 
-The dashboard shows account counts, denylist size, alert count, monitor health, last successful poll/error timestamps, and recent events including event time, detection time, matched domain, status, reason, notification state, retry attempts, and client IP when available.
+The dashboard shows account counts, denylist size, alert count, monitor health, last successful poll time, latest monitor error and error timestamp, and recent events including event time, detection time, matched domain, status, reason, notification state, retry attempts, and client IP when available.
 
 It uses DOM-safe rendering for event data rather than inserting API values as raw HTML.
 

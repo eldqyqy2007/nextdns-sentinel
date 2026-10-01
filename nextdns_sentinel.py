@@ -224,8 +224,8 @@ class FeatureStore:
              "CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_metadata_alert_unique ON alert_metadata(alert_id)"),
             ("domain_intelligence", "DELETE FROM domain_intelligence WHERE rowid NOT IN (SELECT MAX(rowid) FROM domain_intelligence GROUP BY domain)",
              "CREATE UNIQUE INDEX IF NOT EXISTS idx_domain_intelligence_domain_unique ON domain_intelligence(domain)"),
-            ("anomaly_baseline", "DELETE FROM anomaly_baseline WHERE rowid NOT IN (SELECT MAX(rowid) FROM anomaly_baseline GROUP BY profile_id,bucket_hour)",
-             "CREATE UNIQUE INDEX IF NOT EXISTS idx_anomaly_baseline_profile_hour_unique ON anomaly_baseline(profile_id,bucket_hour)"),
+            ("anomaly_baseline", "DELETE FROM anomaly_baseline WHERE rowid NOT IN (SELECT MAX(rowid) FROM anomaly_baseline GROUP BY profile_id,bucket_day,bucket_hour)",
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_anomaly_baseline_profile_day_hour_unique ON anomaly_baseline(profile_id,bucket_day,bucket_hour)"),
             ("sentinel_settings", "DELETE FROM sentinel_settings WHERE rowid NOT IN (SELECT MAX(rowid) FROM sentinel_settings GROUP BY key)",
              "CREATE UNIQUE INDEX IF NOT EXISTS idx_sentinel_settings_key_unique ON sentinel_settings(key)"),
         ]
@@ -635,14 +635,18 @@ class FeatureStore:
             dt=datetime.fromisoformat(str(event_time).replace('Z','+00:00'))
         except ValueError:
             dt=datetime.now(timezone.utc)
+        bucket_day=dt.astimezone(timezone.utc).strftime('%Y-%m-%d')
         bucket=dt.astimezone(timezone.utc).strftime('%H')
         with self._connect() as db:
-            row=db.execute("SELECT count FROM anomaly_baseline WHERE profile_id=? AND bucket_hour=?",(profile_id,bucket)).fetchone()
+            row=db.execute(
+                "SELECT count FROM anomaly_baseline WHERE profile_id=? AND bucket_day=? AND bucket_hour=?",
+                (profile_id,bucket_day,bucket),
+            ).fetchone()
             count=int(row['count'])+1 if row else 1
             db.execute(
-                "INSERT INTO anomaly_baseline(profile_id,bucket_hour,count,updated_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(profile_id,bucket_hour) DO UPDATE SET count=excluded.count,updated_at=excluded.updated_at",
-                (profile_id,bucket,count,now_iso()),
+                "INSERT INTO anomaly_baseline(profile_id,bucket_day,bucket_hour,count,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(profile_id,bucket_day,bucket_hour) DO UPDATE SET count=excluded.count,updated_at=excluded.updated_at",
+                (profile_id,bucket_day,bucket,count,now_iso()),
             )
 
 APP_NAME = "NextDNS Sentinel"

@@ -565,6 +565,46 @@ class Store:
                 "poll_interval_seconds": CHECK_INTERVAL,
             }
 
+    def alert_analytics(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(hours=24)
+        start_iso = start.isoformat()
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                """
+                SELECT event_timestamp,domain,status
+                FROM alerts
+                WHERE event_timestamp >= ?
+                ORDER BY event_timestamp ASC
+                """,
+                (start_iso,),
+            ).fetchall()
+        buckets: dict[str, int] = {}
+        for i in range(24):
+            bucket = (start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=i)).isoformat()
+            buckets[bucket] = 0
+        status_counts: dict[str, int] = {}
+        domains: dict[str, int] = {}
+        for event_timestamp, domain, status in rows:
+            try:
+                event_dt = datetime.fromisoformat(str(event_timestamp).replace("Z", "+00:00"))
+                hour = event_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+                if hour in buckets:
+                    buckets[hour] += 1
+            except (TypeError, ValueError):
+                pass
+            status_key = str(status or "unknown")
+            status_counts[status_key] = status_counts.get(status_key, 0) + 1
+            domain_key = str(domain or "unknown")
+            domains[domain_key] = domains.get(domain_key, 0) + 1
+        top_domains = sorted(domains.items(), key=lambda item: (-item[1], item[0]))[:8]
+        return {
+            "timeline": [{"time": key, "count": value} for key, value in buckets.items()],
+            "statuses": status_counts,
+            "top_domains": [{"domain": key, "count": value} for key, value in top_domains],
+            "total_24h": len(rows),
+        }
+
     def monitor_health(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
@@ -1260,26 +1300,14 @@ DASHBOARD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NextDNS Sentinel</title>
-<style>
-body{font-family:system-ui,sans-serif;background:#080b12;color:#e8edf7;margin:0;padding:18px}
-main{max-width:1150px;margin:auto}h1{margin:0 0 4px}.muted{color:#8c98aa}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}
-.card,.panel{background:#101621;border:1px solid #202a3a;border-radius:14px;padding:16px;margin-bottom:14px}
-.value{font-size:27px;font-weight:700}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #202a3a}
-.ok{color:#9af0bb}.error{color:#ffb4b4}
-button{border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer;margin:3px}
-.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}
-input{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:8px;padding:10px;margin:5px 0 10px}
-label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}
-table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}
-th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}code{color:#9ed0ff}
-.hidden{display:none}.account{padding:10px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}
-</style>
+<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 15% 0%,#14243a 0,#080b12 36%);color:#e8edf7;margin:0;padding:24px;line-height:1.45}main{max-width:1250px;margin:auto}h1{margin:0;font-size:32px;letter-spacing:-.6px}h2{margin:0 0 12px;font-size:18px}h3{margin:0 0 10px}.muted{color:#8c98aa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.card,.panel{background:linear-gradient(145deg,rgba(16,22,33,.97),rgba(11,16,25,.97));border:1px solid #263248;border-radius:16px;padding:17px;margin-bottom:14px;box-shadow:0 12px 35px rgba(0,0,0,.16)}.value{font-size:29px;font-weight:750;margin-top:3px}.card .muted{text-transform:capitalize;font-size:12px;letter-spacing:.4px}.status{margin:10px 0;padding:11px 13px;border-radius:10px;background:#101621;border:1px solid #263248}.ok{color:#9af0bb}.error{color:#ffb4b4}.neutral-text{color:#b8c4d8}button{border:1px solid transparent;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer;margin:3px;transition:transform .15s,filter .15s}button:hover{filter:brightness(1.08);transform:translateY(-1px)}.start{background:#35c76f;color:#07140b}.stop{background:#ef6b73;color:#21080a}.neutral{background:#29364a;color:#e8edf7}input,select{width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:9px;padding:10px;margin:5px 0 10px}label{display:block;font-size:13px;color:#aeb8c8}form{max-width:560px}table{width:100%;border-collapse:collapse;background:#101621;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13px}th{color:#9eabc0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}tbody tr:hover{background:#141d2a}code{color:#9ed0ff}.hidden{display:none}.account{padding:12px 0;border-bottom:1px solid #202a3a}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}.meta div{background:#0b1019;border:1px solid #202a3a;border-radius:8px;padding:9px}.meta strong{display:block;font-size:12px;color:#8c98aa;margin-bottom:3px}.hero{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:22px 24px;margin-bottom:14px}.hero-copy{min-width:0}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:#7f91aa;font-weight:800}.hero-badge{border:1px solid #2d405c;background:#0c1420;border-radius:12px;padding:10px 13px;white-space:nowrap}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:#65758d}.dot.ok{background:#35c76f}.analytics{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.chart{height:230px;display:flex;align-items:flex-end;gap:6px;padding:18px 8px 28px;border-top:1px solid #202a3a}.bar-wrap{height:100%;flex:1;display:flex;align-items:flex-end;justify-content:center;position:relative;min-width:4px}.bar{width:100%;max-width:22px;min-height:3px;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,#55d98a,#2e9e68);transition:height .3s}.bar-label{position:absolute;bottom:-24px;font-size:10px;color:#75839a;white-space:nowrap}.bar-value{position:absolute;top:-18px;font-size:10px;color:#aebbd0}.mini-list{display:grid;gap:8px}.mini-item{display:flex;justify-content:space-between;gap:10px;padding:9px 10px;background:#0b1019;border:1px solid #202a3a;border-radius:9px}.progress{height:5px;background:#202a3a;border-radius:99px;overflow:hidden;margin-top:5px}.progress>span{display:block;height:100%;background:#55d98a}.section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.pill{font-size:11px;padding:4px 8px;border-radius:99px;background:#172235;color:#aebbd0}@media(max-width:800px){body{padding:12px}.analytics{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.hero-badge{width:100%}}</style>
 </head>
 <body>
 <main>
-<h1>NextDNS Sentinel</h1>
-<p class="muted">Local monitoring and control console</p>
+<div class="panel hero">
+<div class="hero-copy"><div class="eyebrow">Security Operations Console</div><h1>NextDNS Sentinel</h1><div class="muted">Local monitoring, alerting and profile control</div></div>
+<div class="hero-badge"><span id="hero-dot" class="dot"></span><span id="hero-status">Checking monitor</span></div>
+</div>
 
 <div class="panel">
 <div class="row"><strong>Monitor:</strong><span id="runtime" class="muted">Checking...</span></div>
@@ -1337,6 +1365,17 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 
 <div class="grid" id="stats"></div>
 
+<div class="analytics">
+<div class="panel">
+<div class="section-head"><div><h2>Alert Activity</h2><div class="muted">Last 24 hours · hourly event volume</div></div><span id="analytics-total" class="pill">0 alerts</span></div>
+<div id="alert-chart" class="chart"></div>
+</div>
+<div class="panel">
+<div class="section-head"><div><h2>Top Domains</h2><div class="muted">Most frequent recent alerts</div></div></div>
+<div id="top-domains" class="mini-list"><div class="muted">Loading...</div></div>
+</div>
+</div>
+
 <div class="panel">
 <h2>Local Denylist Cache</h2>
 <p class="muted">This list is synchronized automatically from each monitored NextDNS profile.</p>
@@ -1365,6 +1404,30 @@ function formatDateTime(value){
  return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'medium'}).format(d);
 }
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
+
+function renderAnalytics(data){
+ const chart=document.getElementById('alert-chart');chart.replaceChildren();
+ const points=data.timeline||[];const max=Math.max(1,...points.map(x=>x.count));
+ for(const point of points){
+  const wrap=document.createElement('div');wrap.className='bar-wrap';wrap.title=formatDateTime(point.time)+': '+point.count+' alert(s)';
+  const value=document.createElement('span');value.className='bar-value';value.textContent=point.count?point.count:'';value.style.display=point.count?'block':'none';
+  const bar=document.createElement('div');bar.className='bar';bar.style.height=(point.count?Math.max(4,(point.count/max)*100):2)+'%';
+  const label=document.createElement('span');label.className='bar-label';label.textContent=new Date(point.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  wrap.append(value,bar,label);chart.append(wrap);
+ }
+ setText('analytics-total',(data.total_24h||0)+' alerts','');
+ const list=document.getElementById('top-domains');list.replaceChildren();
+ const domains=data.top_domains||[];
+ if(!domains.length){list.textContent='No alerts recorded in the last 24 hours.';return;}
+ const maxDomain=Math.max(1,...domains.map(x=>x.count));
+ for(const item of domains){
+  const row=document.createElement('div');row.className='mini-item';
+  const left=document.createElement('div');left.style.minWidth='0';
+  const name=document.createElement('div');name.textContent=item.domain;name.style.overflow='hidden';name.style.textOverflow='ellipsis';name.style.whiteSpace='nowrap';
+  const progress=document.createElement('div');progress.className='progress';const fill=document.createElement('span');fill.style.width=(item.count/maxDomain*100)+'%';progress.append(fill);left.append(name,progress);
+  const count=document.createElement('strong');count.textContent=item.count;row.append(left,count);list.append(row);
+ }
+}
 
 function setText(id,text,cls=''){const e=document.getElementById(id);e.textContent=text;e.className=cls;}
 async function api(path,options={}){
@@ -1520,8 +1583,13 @@ async function refresh(){
   const rt=await api('/api/runtime');setText('runtime',rt.running?'Running':'Stopped',rt.running?'ok':'muted');
   setText('telegram-status',rt.telegram_configured?'Telegram configured.':'Telegram not configured.',rt.telegram_configured?'ok':'muted');
   const s=await api('/api/stats');const stats=document.getElementById('stats');stats.replaceChildren();
-  for(const [k,v] of Object.entries(s)){if(k.startsWith('last_'))continue;const card=document.createElement('div');card.className='card';const l=document.createElement('div');l.className='muted';l.textContent=k.replaceAll('_',' ');const val=document.createElement('div');val.className='value';val.textContent=v;card.append(l,val);stats.append(card);}
+  const cards=[
+    ['Monitored Profiles',s.accounts],['Active Profiles',s.active_accounts],['Alerts Total',s.alerts],['Denylist Entries',s.denylist_entries],['Poll Interval',s.poll_interval_seconds+'s']
+  ];
+  for(const [label,value] of cards){const card=document.createElement('div');card.className='card';const l=document.createElement('div');l.className='muted';l.textContent=label;const val=document.createElement('div');val.className='value';val.textContent=value;card.append(l,val);stats.append(card);}
+  const analytics=await api('/api/analytics');renderAnalytics(analytics);
   const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
+  const heroDot=document.getElementById('hero-dot');heroDot.className='dot '+(s.last_error?'':'ok');setText('hero-status',s.last_error?'Attention required':'Monitoring healthy',s.last_error?'error':'ok');
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
   for(const a of accounts){const row=document.createElement('div');row.className='account';
@@ -1563,6 +1631,10 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
     @app.get("/api/alerts")
     def api_alerts() -> Any:
         return jsonify(store.recent_alerts())
+
+    @app.get("/api/analytics")
+    def api_analytics() -> Any:
+        return jsonify(store.alert_analytics())
 
     @app.get("/api/runtime")
     def api_runtime() -> Any:

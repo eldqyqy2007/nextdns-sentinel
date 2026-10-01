@@ -1480,8 +1480,14 @@ class Store:
             deleted += db.execute("DELETE FROM alert_metadata WHERE alert_id NOT IN (SELECT id FROM alerts)").rowcount
             deleted += db.execute("DELETE FROM incident_alerts WHERE alert_id NOT IN (SELECT id FROM alerts)").rowcount
             db.commit()
-            db.execute("VACUUM")
-            db.execute("INSERT INTO retention_runs(retention_days,deleted_alerts,vacuumed,created_at) VALUES(?,?,?,?)",(days,deleted,1,now_iso()))
+            vacuumed = 0
+            try:
+                db.execute("VACUUM")
+                vacuumed = 1
+            except sqlite3.DatabaseError:
+                logging.debug("SQLite VACUUM skipped during retention cleanup", exc_info=True)
+            db.execute("INSERT INTO retention_runs(retention_days,deleted_alerts,vacuumed,created_at) VALUES(?,?,?,?)",(days,deleted,vacuumed,now_iso()))
+            db.commit()
         return deleted
 
     def rate_limit_history(self, limit=100):

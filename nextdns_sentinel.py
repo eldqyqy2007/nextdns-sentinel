@@ -590,8 +590,8 @@ class Store:
                 dict(r)
                 for r in db.execute(
                     """
-                    SELECT event_key,account_name,domain,matched_domain,reason,status,
-                           client_ip,event_timestamp
+                    SELECT id,event_key,account_name,domain,matched_domain,reason,status,
+                           client_ip,event_timestamp,device_id,device_name,device_model,protocol,encrypted
                     FROM alerts
                     WHERE profile_id=? AND notified_at=''
                       AND notification_status='pending'
@@ -1307,6 +1307,28 @@ class Sentinel:
             return False
         return send_telegram(self.telegram_token, self.telegram_chat_id, "\n".join(lines))
 
+    def enrich_alert(self, event_key: str, account: dict[str, Any], domain: str, reason: str,
+                     status: str, matched: str, client_ip: str, event_time: str,
+                     device_id: str, device_name: str, device_model: str,
+                     protocol: str, encrypted: bool) -> int | None:
+        if not self.features:
+            return None
+        context = self.features.alert_by_event_key(event_key)
+        alert_id = int(context["id"]) if context.get("id") else None
+        if not alert_id:
+            return None
+        self.features.process_alert(alert_id, {
+            "profile_id": account["profile_id"], "account_name": account["name"],
+            "domain": domain, "reason": reason, "status": status,
+            "alert_type": context.get("alert_type") or "security_event",
+            "device_id": device_id, "device_name": device_name,
+            "device_model": device_model, "event_timestamp": event_time,
+            "matched_domain": matched, "client_ip": client_ip,
+            "protocol": protocol, "encrypted": encrypted,
+            "title": domain or reason or "Security event",
+        })
+        return alert_id
+
     def monitor_account(self, account: dict[str, Any]) -> None:
         client = NextDNSClient(account["api_key"])
         profile_id = account["profile_id"]
@@ -1327,9 +1349,14 @@ class Sentinel:
                             change_id=self.store.add_config_change(profile_id,previous,live_snapshot,change_type)
                             key=hashlib.sha256(f"config:{profile_id}:{change_id}".encode()).hexdigest()
                             self.store.add_alert(profile_id,account["name"],"", "", "Configuration changed: "+change_type, "config_changed", "", utc_now(), key, "config_change", source="nextdns_profile")
-                            delivered=self.notify(account,"","Configuration changed: "+change_type,"config_changed","",event_time=utc_now())
-                            if delivered: self.store.mark_alert_notified(key)
-                            else: self.store.mark_notification_failed(key)
+                            alert_id=self.enrich_alert(key,account,"","Configuration changed: "+change_type,"config_changed","","",utc_now(),"","","","",False)
+                            delivered=self.notify(account,"","Configuration changed: "+change_type,"config_changed","",event_time=utc_now(),alert_id=alert_id)
+                            if delivered:
+                                self.store.mark_alert_notified(key)
+                                if self.features and alert_id: self.features.delivery(alert_id,"telegram","sent")
+                            else:
+                                self.store.mark_notification_failed(key)
+                                if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
                         self.store.save_config_snapshot(profile_id,live_snapshot)
                     except Exception as exc:
                         logging.warning("Profile configuration snapshot failed for %s: %s",account["name"],exc)
@@ -1379,9 +1406,14 @@ class Sentinel:
                                 key=hashlib.sha256(("inactive:"+profile_id+":"+device["device_id"]+":"+device["last_seen_at"]).encode()).hexdigest()
                                 reason="No recent DNS activity detected; DNS may be inactive on this device."
                                 self.store.add_alert(profile_id,account["name"],"","",reason,"device_inactive",device.get("client_ip",""),device["last_seen_at"],key,"device_inactive",device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"")
-                                delivered=self.notify(account,"",reason,"device_inactive","",device.get("client_ip",""),device["last_seen_at"],device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"")
-                                if delivered: self.store.mark_alert_notified(key)
-                                else: self.store.mark_notification_failed(key)
+                                alert_id=self.enrich_alert(key,account,"",reason,"device_inactive","",device.get("client_ip",""),device["last_seen_at"],device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"",False)
+                                delivered=self.notify(account,"",reason,"device_inactive","",device.get("client_ip",""),device["last_seen_at"],device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"",False,alert_id)
+                                if delivered:
+                                    self.store.mark_alert_notified(key)
+                                    if self.features and alert_id: self.features.delivery(alert_id,"telegram","sent")
+                                else:
+                                    self.store.mark_notification_failed(key)
+                                    if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
                         except (TypeError,ValueError):
                             continue
 
@@ -1405,22 +1437,21 @@ class Sentinel:
                             account["name"],
                             domain,
                         )
+                        alert_id=self.enrich_alert(key,account,domain,reason,status,matched,client_ip,event_time,device_id,device_name,device_model,protocol,encrypted)
                         if not recently_notified:
                             delivered = self.notify(
-                                account,
-                                domain,
-                                reason,
-                                status,
-                                matched,
-                                client_ip,
-                                event_time,
+                                account, domain, reason, status, matched, client_ip, event_time,
+                                device_id, device_name, device_model, protocol, encrypted, alert_id,
                             )
                             if delivered:
                                 self.store.mark_alert_notified(key)
+                                if self.features and alert_id: self.features.delivery(alert_id,"telegram","sent")
                             else:
                                 self.store.mark_notification_failed(key)
+                                if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
                         else:
                             self.store.mark_alert_suppressed(key)
+                            if self.features and alert_id: self.features.delivery(alert_id,"telegram","suppressed")
                             logging.info(
                                 "Telegram notification suppressed by cooldown for %s",
                                 domain,
@@ -1438,6 +1469,7 @@ class Sentinel:
                         )
                         continue
 
+                    alert_id=int(alert.get("id") or 0) or None
                     delivered = self.notify(
                         account,
                         alert["domain"],
@@ -1446,11 +1478,16 @@ class Sentinel:
                         alert["matched_domain"],
                         alert["client_ip"],
                         alert["event_timestamp"],
+                        alert.get("device_id",""), alert.get("device_name",""),
+                        alert.get("device_model",""), alert.get("protocol",""),
+                        bool(alert.get("encrypted")), alert_id,
                     )
                     if delivered:
                         self.store.mark_alert_notified(alert["event_key"])
+                        if self.features and alert_id: self.features.delivery(alert_id,"telegram","sent")
                     else:
                         self.store.mark_notification_failed(alert["event_key"])
+                        if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
 
                 self.store.set_poll_state(profile_id, checkpoint_ms)
                 if self.stop_event:

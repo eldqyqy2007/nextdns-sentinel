@@ -627,7 +627,9 @@ class Sentinel:
 "
             f"Reason: {reason or 'Custom denylist match'}
 "
-            f"Time: {utc_now()}"
+            f"Event Time: {event_time or 'n/a'}
+"
+            f"Detected At: {utc_now()}"
         )
         if client_ip:
             message += f"

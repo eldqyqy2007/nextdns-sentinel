@@ -12,72 +12,110 @@
 
 # <img src="./assets/icons/sentinel.svg" alt="" width="32" height="32" align="absmiddle"> NextDNS Sentinel
 
-**NextDNS Sentinel** is a local-first monitoring utility for **NextDNS profiles you own or administer**. It polls DNS logs, matches domains against custom denylists, stores detected events locally in SQLite, and can send Telegram alerts.
+A local-first monitoring utility for **NextDNS profiles you own or administer**. It polls DNS logs, matches observed domains against each profile's custom denylist, stores matched events locally in SQLite, and can send Telegram alerts without requiring a hosted backend.
 
-The application is intentionally **single-file**: the monitoring engine, API client, matching logic, database layer, alerts, dashboard, and CLI are all contained in `nextdns_sentinel.py`.
+> **Design principle:** operational data stays local, secrets stay outside Git, and the dashboard stays local by default.
 
-> **Design principle:** keep operational data local, keep secrets outside Git, and expose the dashboard locally by default.
+## <img src="./assets/icons/overview.svg" alt="" width="24" height="24" align="absmiddle"> Table of contents
 
-## <img src="./assets/icons/overview.svg" alt="" width="24" height="24" align="absmiddle"> Features
+- [Why this tool](#why-this-tool)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Detection flow](#detection-flow)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Web dashboard](#web-dashboard)
+- [Data and storage](#data-and-storage)
+- [Security model](#security-model)
+- [Project structure](#project-structure)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## <img src="./assets/icons/monitor.svg" alt="" width="24" height="24" align="absmiddle"> Why this tool
+
+Sentinel is built for defensive visibility over NextDNS configurations you are authorized to manage. It is intentionally local-first: NextDNS is the data source, SQLite is the local persistence layer, Telegram is optional alert transport, and the dashboard is a local view.
+
+## <img src="./assets/icons/features.svg" alt="" width="24" height="24" align="absmiddle"> Features
 
 - **Multi-profile monitoring** with independent worker threads.
 - **Denylist matching** for exact domains, parent domains, and wildcard-style entries.
-- **Persistent polling state** with a small overlap window to reduce missed events.
-- **Duplicate protection** using deterministic SHA-256 event fingerprints.
-- **Alert cooldown** to reduce repeated Telegram notifications.
-- **Rich event data** including matched domain, status, reason, client IP, and timestamp when available.
-- **SQLite persistence** for accounts, denylist snapshots, alerts, and monitor state.
-- **Fernet encryption** for stored NextDNS API keys.
-- **API resilience** with timeouts, retries, exponential backoff, and handling for 429/5xx responses.
-- **Local Flask dashboard** with statistics, health status, and recent alerts.
-- **Environment-based secrets** and graceful shutdown.
+- **Overlap-aware polling** with persistent last-poll state to reduce missed events between cycles.
+- **Duplicate protection** using deterministic event fingerprints.
+- **Alert cooldown** to reduce repeated Telegram notifications for the same profile/domain.
+- **Richer event context** including status, reasons, matched domain, and client IP when supplied by NextDNS.
+- **Local SQLite storage** with application-layer Fernet encryption for stored API keys.
+- **Resilient API client** with retry/backoff handling for network errors, rate limits, and server errors.
+- **Local dashboard** with statistics, recent alerts, and monitor health.
+- **Environment-based secrets** and localhost-first dashboard binding.
+- **Graceful shutdown** for monitor workers.
 
-## <img src="./assets/icons/process.svg" alt="" width="24" height="24" align="absmiddle"> How it works
+## <img src="./assets/icons/process.svg" alt="" width="24" height="24" align="absmiddle"> Architecture
 
 ```text
-                 NextDNS API
-                      |
-          +-----------+-----------+
-          |           |           |
-       Profiles    Denylist      Logs
-          |           |           |
-          +-----------+-----------+
-                      |
-                      v
-             NextDNS Sentinel
-                      |
-               Domain matching
-                      |
-                +-----+-----+
-                |           |
-              Match      No match
-                |
-          Event fingerprint
-                |
-          +-----+-----+
-          |           |
-       Duplicate    New event
-          |           |
-        Ignore      SQLite
-                      |
-               +------+------+
-               |             |
-            Telegram      Dashboard
+                         NextDNS API
+                             |
+              +--------------+--------------+
+              |              |              |
+           Profiles       Denylist         Logs
+              |              |              |
+              +--------------+--------------+
+                             |
+                             v
+                  +----------------------+
+                  |   NextDNS Sentinel   |
+                  |  Monitor + Matcher   |
+                  +----------+-----------+
+                             |
+              +--------------+--------------+
+              |                             |
+              v                             v
+       Local SQLite DB                 Telegram API
+              |                             |
+              v                             v
+       Local Web Dashboard             Alerts
 ```
 
-For every active profile, Sentinel remembers the last polling point and queries from slightly before it on the next cycle. The overlap helps reduce boundary misses, while the unique event fingerprint prevents duplicate records.
+## <img src="./assets/icons/process.svg" alt="" width="24" height="24" align="absmiddle"> Detection flow
+
+```text
+NextDNS Logs
+     |
+     v
+Domain Extraction
+     |
+     v
+Custom Denylist
+     |
+     v
+Domain Matching
+     |
+     v
+Event Fingerprint
+   /       \
+Duplicate   New Event
+   |           |
+ Ignore     SQLite
+               |
+          +----+----+
+          |         |
+       Telegram   Dashboard
+```
 
 ## <img src="./assets/icons/requirements.svg" alt="" width="24" height="24" align="absmiddle"> Requirements
 
 | Requirement | Purpose |
 |---|---|
 | Python 3.10+ | Runtime |
-| NextDNS API access | Profiles, denylists, and DNS logs |
-| Flask | Web dashboard |
-| Requests | API communication |
-| Cryptography | Fernet API-key encryption |
-| SQLite | Local storage |
+| NextDNS API access | Profile, denylist, and log monitoring |
 | Telegram bot + chat ID | Optional alerts |
+| `cryptography` | Fernet API-key encryption |
+| SQLite | Included with Python |
 
 ## <img src="./assets/icons/install.svg" alt="" width="24" height="24" align="absmiddle"> Installation
 
@@ -104,37 +142,17 @@ pip install -r requirements.txt
 
 ## <img src="./assets/icons/config.svg" alt="" width="24" height="24" align="absmiddle"> Configuration
 
-Create your local configuration:
-
+Copy the example:
 ```bash
 cp config.example.json config.json
 ```
 
-Example:
-
-```json
-{
-  "accounts": [
-    {
-      "profile_id": "YOUR_PROFILE_ID",
-      "name": "Primary Profile",
-      "profile_name": "My NextDNS Profile",
-      "api_key_env": "NEXTDNS_PROFILE_1_API_KEY",
-      "active": true
-    }
-  ],
-  "telegram_token_env": "TELEGRAM_BOT_TOKEN",
-  "telegram_chat_id_env": "TELEGRAM_CHAT_ID"
-}
-```
-
-Generate the encryption key:
-
+Generate a Fernet key:
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Set the required secrets:
+Set the generated value as `NEXTDNS_SENTINEL_SECRET_KEY`. Then configure the environment variables referenced by `config.json`:
 
 ```bash
 export NEXTDNS_SENTINEL_SECRET_KEY="your-fernet-key"
@@ -143,117 +161,65 @@ export TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
 export TELEGRAM_CHAT_ID="your-telegram-chat-id"
 ```
 
-Telegram variables are optional. Never commit `config.json`, API keys, tokens, Fernet keys, databases, or logs.
+Keep the Fernet key outside Git and back it up securely. Losing it means stored API keys cannot be decrypted.
 
 ### Configuration reference
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `NEXTDNS_SENTINEL_SECRET_KEY` | Required | Fernet encryption key |
-| `NEXTDNS_SENTINEL_DB` | `data/sentinel.db` | SQLite database path |
-| `NEXTDNS_SENTINEL_CONFIG` | `config.json` | Configuration path |
+| `NEXTDNS_SENTINEL_SECRET_KEY` | — | Fernet key for stored API keys |
+| `NEXTDNS_SENTINEL_DB` | `data/sentinel.db` | SQLite path |
+| `NEXTDNS_SENTINEL_CONFIG` | `config.json` | Config path |
 | `NEXTDNS_SENTINEL_INTERVAL` | `15` | Poll interval in seconds |
-| `NEXTDNS_SENTINEL_INITIAL_LOOKBACK` | `60` | First-poll lookback |
+| `NEXTDNS_SENTINEL_INITIAL_LOOKBACK` | `60` | First poll lookback |
 | `NEXTDNS_SENTINEL_POLL_OVERLAP_MS` | `5000` | Poll overlap |
-| `NEXTDNS_SENTINEL_ALERT_COOLDOWN` | `300` | Telegram cooldown |
-| `NEXTDNS_SENTINEL_API_RETRIES` | `3` | API retries |
+| `NEXTDNS_SENTINEL_ALERT_COOLDOWN` | `300` | Telegram cooldown per profile/domain |
+| `NEXTDNS_SENTINEL_API_RETRIES` | `3` | API retry attempts |
 | `NEXTDNS_SENTINEL_HTTP_TIMEOUT` | `10` | HTTP timeout |
-| `NEXTDNS_SENTINEL_HOST` | `127.0.0.1` | Dashboard host |
+| `NEXTDNS_SENTINEL_HOST` | `127.0.0.1` | Dashboard bind address |
 | `NEXTDNS_SENTINEL_PORT` | `5000` | Dashboard port |
 | `NEXTDNS_SENTINEL_LOG_LEVEL` | `INFO` | Log level |
 
 ## <img src="./assets/icons/usage.svg" alt="" width="24" height="24" align="absmiddle"> Usage
 
-Start monitoring:
-
+Monitor:
 ```bash
 python nextdns_sentinel.py --monitor
 ```
 
-Start the dashboard:
-
+Dashboard:
 ```bash
 python nextdns_sentinel.py --dashboard
 ```
 
-Default dashboard:
+Default dashboard: `http://127.0.0.1:5000`.
+
+If you intentionally bind to a non-localhost address, add network controls/authentication outside this lightweight dashboard. The application itself does not provide dashboard authentication.
+
+## <img src="./assets/icons/dashboard.svg" alt="" width="24" height="24" align="absmiddle"> Web dashboard
+
+The dashboard shows account counts, denylist size, alert count, monitor health, last successful poll/error, and recent events including matched domain, status, reason, and client IP when available.
+
+It uses DOM-safe rendering for event data rather than inserting API values as raw HTML.
+
+## <img src="./assets/icons/storage.svg" alt="" width="24" height="24" align="absmiddle"> Data and storage
 
 ```text
-http://127.0.0.1:5000
+data/
+└── sentinel.db
 ```
 
-Custom host/port:
+SQLite stores profile metadata, encrypted API keys, denylist snapshots, alert history, event fingerprints, and monitor state. Existing databases are migrated for the added event fields/state table.
 
-```bash
-python nextdns_sentinel.py --dashboard --host 127.0.0.1 --port 8080
-```
+## <img src="./assets/icons/security.svg" alt="" width="24" height="24" align="absmiddle"> Security model
 
-Help:
-
-```bash
-python nextdns_sentinel.py --help
-```
-
-Press **Ctrl+C** to stop the monitor gracefully.
-
-## <img src="./assets/icons/dashboard.svg" alt="" width="24" height="24" align="absmiddle"> Dashboard & Alerts
-
-The local dashboard provides:
-
-- Configured and active account counts
-- Denylist entry count
-- Total alert count
-- Poll interval
-- Last successful poll
-- Latest monitor error
-- Recent alerts with domain, matched domain, status, and reason
-
-It refreshes automatically and safely renders event data using DOM APIs.
-
-When Telegram is configured, alerts can include:
-
-```text
-Account: Primary Profile
-Domain: sub.example.com
-Matched: example.com
-Status: blocked
-Reason: Custom denylist match
-Time: 2026-10-01T00:00:00+00:00
-```
-
-Telegram delivery is best-effort; monitoring continues if delivery fails.
-
-## <img src="./assets/icons/storage.svg" alt="" width="24" height="24" align="absmiddle"> Storage & Security
-
-The default database is:
-
-```text
-data/sentinel.db
-```
-
-SQLite stores:
-
-- Account metadata and encrypted API keys
-- Cached denylists
-- Detected alerts and event fingerprints
-- Monitor polling state and errors
-
-API keys are encrypted with **Fernet** before storage. The Fernet key itself is supplied through `NEXTDNS_SENTINEL_SECRET_KEY` and is not stored by the application.
-
-The dashboard binds to **localhost by default** and has no built-in authentication. If you expose it beyond localhost, use appropriate network controls and authentication.
-
-## <img src="./assets/icons/security.svg" alt="" width="24" height="24" align="absmiddle"> Reliability & Limitations
-
-Sentinel handles network errors, HTTP 429 rate limits, HTTP 5xx responses, retries, timeouts, and Telegram delivery failures.
-
-Current limitations:
-
-- NextDNS logs are polled rather than streamed.
-- The logs request is limited to 100 records per cycle.
-- Pagination/cursor support is not implemented.
-- Telegram is optional and best-effort.
-- The dashboard has no built-in authentication.
-- Losing the Fernet key makes stored API keys unrecoverable.
+- Monitor only profiles you own or administer.
+- API keys enter through environment variables and are encrypted before local storage.
+- Telegram credentials remain environment-based.
+- Do not commit `config.json`, databases, logs, secrets, or private DNS data.
+- The Fernet key protects stored API-key values; it does **not** encrypt the whole SQLite database.
+- The dashboard defaults to localhost and has no authentication layer.
+- Non-localhost binding produces a warning.
 
 ## <img src="./assets/icons/project.svg" alt="" width="24" height="24" align="absmiddle"> Project structure
 
@@ -270,7 +236,19 @@ nextdns-sentinel/
 └── README.md
 ```
 
-The complete runtime implementation is contained in **`nextdns_sentinel.py`**. There are no separate test or workflow files required by the application.
+## <img src="./assets/icons/limits.svg" alt="" width="24" height="24" align="absmiddle"> Limitations
+
+- NextDNS API availability and response format can change.
+- Polling is not a provider-side streaming connection.
+- The logs endpoint currently requests up to 100 records per cycle; very high-volume profiles may require a shorter interval or future pagination/cursor support.
+- SQLite is local persistence, not a distributed database.
+- Telegram is best-effort; monitoring continues if notification delivery fails.
+- Losing the Fernet key makes stored API keys unrecoverable.
+- The dashboard is lightweight and intentionally does not implement user authentication.
+
+## <img src="./assets/icons/contributing.svg" alt="" width="24" height="24" align="absmiddle"> Contributing
+
+Issues and pull requests are welcome. Never include API keys, Telegram bot tokens, private chat IDs, private DNS logs, or sensitive profile information in issues or commits.
 
 ## <img src="./assets/icons/license.svg" alt="" width="24" height="24" align="absmiddle"> License
 

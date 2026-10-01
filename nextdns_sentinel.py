@@ -3002,11 +3002,18 @@ DASHBOARD = """<!doctype html>
 </div>
 </div>
 <script>
+function pad2(value){return String(value).padStart(2,'0');}
 function formatDateTime(value){
  if(!value)return '—';
  const d=new Date(value);
  if(Number.isNaN(d.getTime()))return String(value);
- return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'medium'}).format(d);
+ return d.getUTCFullYear()+'-'+pad2(d.getUTCMonth()+1)+'-'+pad2(d.getUTCDate())+' '+pad2(d.getUTCHours())+':'+pad2(d.getUTCMinutes())+':'+pad2(d.getUTCSeconds())+' UTC';
+}
+function formatTime(value){
+ if(!value)return '—';
+ const d=new Date(value);
+ if(Number.isNaN(d.getTime()))return String(value);
+ return pad2(d.getUTCHours())+':'+pad2(d.getUTCMinutes());
 }
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
 
@@ -3112,7 +3119,7 @@ function renderAnalytics(data){
   const wrap=document.createElement('div');wrap.className='bar-wrap';wrap.title=formatDateTime(point.time)+': '+point.count+' alert(s)';
   const value=document.createElement('span');value.className='bar-value';value.textContent=point.count?point.count:'';value.style.display=point.count?'block':'none';
   const bar=document.createElement('div');bar.className='bar';bar.style.height=(point.count?Math.max(4,(point.count/max)*100):2)+'%';
-  const label=document.createElement('span');label.className='bar-label';label.textContent=new Date(point.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const label=document.createElement('span');label.className='bar-label';label.textContent=formatTime(point.time);
   wrap.append(value,bar,label);chart.append(wrap);
  }
  setText('analytics-total',(data.total_24h||0)+' alerts','');

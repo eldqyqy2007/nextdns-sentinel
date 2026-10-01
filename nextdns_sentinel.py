@@ -2473,6 +2473,15 @@ class Sentinel:
             self.stop()
 
 
+AUTH_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NextDNS Sentinel · Authentication</title>
+<style>body{font-family:system-ui;background:#080b12;color:#e8edf7;display:grid;place-items:center;min-height:100vh;margin:0}.box{width:min(420px,calc(100% - 32px));background:#101621;border:1px solid #263248;border-radius:16px;padding:24px;box-shadow:0 20px 50px #0008}input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:9px;margin-top:10px}input{background:#0b1019;color:#e8edf7;border:1px solid #303b4e}button{background:#35c76f;border:0;font-weight:800;cursor:pointer}.muted{color:#8c98aa;font-size:13px}.error{color:#ffb4b4;margin-top:10px}</style></head>
+<body><div class="box"><h2>NextDNS Sentinel</h2><div class="muted">API authentication is enabled. Sign in to open the dashboard.</div>
+<input id="token" type="password" autocomplete="current-password" placeholder="Sentinel API token">
+<button onclick="login()">Sign in</button><div id="error" class="error"></div></div>
+<script>async function login(){const e=document.getElementById('error');e.textContent='';try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.getElementById('token').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Authentication failed');location.reload()}catch(x){e.textContent=x.message}}</script></body></html>"""
+
 DASHBOARD = """<!doctype html>
 <html lang="en">
 <head>
@@ -3369,6 +3378,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/")
     def index() -> str:
+        if store.setting("api_auth_hash","") and not session.get("sentinel_authenticated"):
+            return render_template_string(AUTH_PAGE), 401
         return render_template_string(DASHBOARD)
 
     @app.get("/api/stats")

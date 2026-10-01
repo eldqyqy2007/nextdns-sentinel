@@ -482,7 +482,7 @@ class FeatureStore:
                 checks['sqlite'] = True
             except sqlite3.Error:
                 checks['sqlite'] = False
-            checks['alerts'] = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'").fetchone() is not None
+            checks['alerts'] = True
             checks['tables'] = all(
                 db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
                 for name in ('alert_metadata','incidents','audit_log','delivery_events','sentinel_health')

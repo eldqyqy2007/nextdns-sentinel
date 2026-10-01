@@ -345,6 +345,23 @@ class Store:
                 "poll_interval_seconds": CHECK_INTERVAL,
             }
 
+    def monitor_health(self) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            return [
+                dict(r)
+                for r in db.execute(
+                    """
+                    SELECT a.profile_id,a.name,a.active,
+                           s.last_poll_ms,s.last_success_at,s.last_error
+                    FROM accounts a
+                    LEFT JOIN monitor_state s ON s.profile_id=a.profile_id
+                    ORDER BY a.name
+                    """
+                )
+            ]
+
+
     def recent_alerts(self, limit: int = 25) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
@@ -884,6 +901,7 @@ code{color:#9ed0ff}
 <h1>NextDNS Sentinel</h1>
 <p class="muted">Local monitoring dashboard</p>
 <div class="status" id="health">Loading monitor health...</div>
+<div class="status" id="accounts-health">Loading account health...</div>
 <div class="grid" id="stats"></div>
 <h2>Recent alerts</h2>
 <table>
@@ -926,6 +944,22 @@ async function refresh(){
       : 'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
     if(s.last_error) health.classList.add('error');
 
+    const healthResponse=await fetch('/api/health');
+    if(!healthResponse.ok) throw new Error('Health API returned HTTP '+healthResponse.status);
+    const accountHealth=await healthResponse.json();
+    const healthBox=document.querySelector('#accounts-health');
+    healthBox.replaceChildren();
+    for(const account of accountHealth){
+      const row=document.createElement('div');
+      row.textContent=account.name+' · '+(
+        account.last_error
+          ? 'Error: '+account.last_error
+          : 'Last success: '+(account.last_success_at||'not available')
+      );
+      if(account.last_error) row.className='error';
+      healthBox.append(row);
+    }
+
     const alertsResponse=await fetch('/api/alerts');
     if(!alertsResponse.ok) throw new Error('Alerts API returned HTTP '+alertsResponse.status);
     const alerts=await alertsResponse.json();
@@ -966,6 +1000,10 @@ def create_app(store: Store) -> Flask:
     @app.get("/api/stats")
     def api_stats() -> Any:
         return jsonify(store.stats())
+
+    @app.get("/api/health")
+    def api_health() -> Any:
+        return jsonify(store.monitor_health())
 
     @app.get("/api/alerts")
     def api_alerts() -> Any:

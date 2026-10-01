@@ -968,7 +968,7 @@ code{color:#9ed0ff}
 <h2>Recent alerts</h2>
 <table>
 <thead><tr>
-<th>Time</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th>
+<th>Event Time</th><th>Detected At</th><th>Account</th><th>Domain</th><th>Matched</th><th>Status</th><th>Reason</th>
 </tr></thead>
 <tbody id="alerts"></tbody>
 </table>
@@ -1030,8 +1030,8 @@ async function refresh(){
     for(const x of alerts){
       const tr=document.createElement('tr');
       for(const [key,code] of [
-        ['created_at',false],['account_name',false],['domain',true],
-        ['matched_domain',true],['status',false],['reason',false]
+        ['event_timestamp',false],['created_at',false],['account_name',false],
+        ['domain',true],['matched_domain',true],['status',false],['reason',false]
       ]){
         const td=document.createElement('td');
         td.append(cell(x[key],code));

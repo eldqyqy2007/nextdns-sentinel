@@ -240,6 +240,7 @@ class FeatureStore:
     def enrich_alert(self, alert_id: int, profile_id: str, alert_type: str, status: str,
                      domain: str, device_id: str, event_time: str) -> dict[str, Any]:
         intel = self._domain_intel(domain)
+        self.update_baseline(profile_id, event_time)
         anomaly = self._baseline_anomaly(profile_id, event_time)
         severity, score, factors = self._severity(alert_type, status, intel['risk'], anomaly)
         with self._connect() as db:

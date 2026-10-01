@@ -866,6 +866,18 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN last_notification_attempt_at TEXT NOT NULL DEFAULT ''")
         if "next_retry_at" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN next_retry_at TEXT NOT NULL DEFAULT ''")
+        for column, definition in {
+            "alert_type": "TEXT NOT NULL DEFAULT 'denylist_match'",
+            "device_id": "TEXT NOT NULL DEFAULT ''",
+            "device_name": "TEXT NOT NULL DEFAULT ''",
+            "device_model": "TEXT NOT NULL DEFAULT ''",
+            "protocol": "TEXT NOT NULL DEFAULT ''",
+            "encrypted": "INTEGER NOT NULL DEFAULT 0",
+            "source": "TEXT NOT NULL DEFAULT 'nextdns_logs'",
+            "seen_at": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in columns:
+                db.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
         db.execute("""
             INSERT OR IGNORE INTO notification_state(alert_id,state,created_at,sent_at,seen_at)
             SELECT id,
@@ -879,18 +891,6 @@ class Store:
                    seen_at
             FROM alerts
         """)
-        for column, definition in {
-            "alert_type": "TEXT NOT NULL DEFAULT 'denylist_match'",
-            "device_id": "TEXT NOT NULL DEFAULT ''",
-            "device_name": "TEXT NOT NULL DEFAULT ''",
-            "device_model": "TEXT NOT NULL DEFAULT ''",
-            "protocol": "TEXT NOT NULL DEFAULT ''",
-            "encrypted": "INTEGER NOT NULL DEFAULT 0",
-            "source": "TEXT NOT NULL DEFAULT 'nextdns_logs'",
-            "seen_at": "TEXT NOT NULL DEFAULT ''",
-        }.items():
-            if column not in columns:
-                db.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
         db.execute("""
             CREATE TABLE IF NOT EXISTS device_state (
                 profile_id TEXT NOT NULL,

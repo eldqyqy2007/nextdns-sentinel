@@ -3013,7 +3013,10 @@ function formatTime(value){
  if(!value)return '—';
  const d=new Date(value);
  if(Number.isNaN(d.getTime()))return String(value);
- return pad2(d.getUTCHours())+':'+pad2(d.getUTCMinutes());
+ const hours=d.getUTCHours();
+ const hour12=hours%12||12;
+ const suffix=hours>=12?'PM':'AM';
+ return pad2(hour12)+':'+pad2(d.getUTCMinutes())+' '+suffix;
 }
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
 

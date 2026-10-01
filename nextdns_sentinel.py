@@ -3525,6 +3525,18 @@ function setupDashboardPages(){
  document.querySelectorAll('.panel').forEach(p=>{p.dataset.page='';for(const [page,ids] of Object.entries(map)){if(ids.some(id=>p.querySelector('#'+id))){p.dataset.page=page;break}}});
  const stats=document.getElementById('stats');if(stats)stats.dataset.page='overview';
 }
+function navigateToTarget(page,targetId){
+ const target=targetId?String(targetId):'';
+ if(!target){showPage(page);return;}
+ const current=localStorage.getItem('sentinel_active_page')||'overview';
+ if(current===page){showPage(page);requestAnimationFrame(()=>document.getElementById(target)?.scrollIntoView({behavior:'smooth',block:'start'}));}
+ else{sessionStorage.setItem('sentinel_scroll_target',target);showPage(page);}
+}
+function scrollToPendingTarget(page){
+ const target=sessionStorage.getItem('sentinel_scroll_target');if(!target)return;
+ sessionStorage.removeItem('sentinel_scroll_target');
+ setTimeout(()=>document.getElementById(target)?.scrollIntoView({behavior:'smooth',block:'start'}),80);
+}
 function showPage(page){
  localStorage.setItem('sentinel_active_page',page);
  setupDashboardPages();
@@ -3539,7 +3551,14 @@ function showPage(page){
 
  if(page==='data')loadAlertLogSettings();
  if(window.innerWidth<=900)toggleSidebar(false);
+ scrollToPendingTarget(page);
 }
+document.addEventListener('click',event=>{
+ const target=event.target.closest('[data-nav-page][data-nav-target]');
+ if(!target)return;
+ event.preventDefault();
+ navigateToTarget(target.dataset.navPage,target.dataset.navTarget);
+});
 function toggleSidebar(force){
  const s=document.getElementById('sidebar');if(!s)return;
  const open=typeof force==='boolean'?force:!s.classList.contains('open');s.classList.toggle('open',open);

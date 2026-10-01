@@ -33,6 +33,7 @@ CHECK_INTERVAL = max(5, int(os.getenv("NEXTDNS_SENTINEL_INTERVAL", "15")))
 INITIAL_LOOKBACK = max(30, int(os.getenv("NEXTDNS_SENTINEL_INITIAL_LOOKBACK", "60")))
 POLL_OVERLAP_MS = max(0, int(os.getenv("NEXTDNS_SENTINEL_POLL_OVERLAP_MS", "5000")))
 ALERT_COOLDOWN = max(0, int(os.getenv("NEXTDNS_SENTINEL_ALERT_COOLDOWN", "300")))
+ALERT_RETENTION_DAYS = max(0, int(os.getenv("NEXTDNS_SENTINEL_ALERT_RETENTION_DAYS", "90")))
 API_RETRIES = max(0, int(os.getenv("NEXTDNS_SENTINEL_API_RETRIES", "3")))
 SECRET_KEY = os.getenv("NEXTDNS_SENTINEL_SECRET_KEY", "")
 
@@ -246,6 +247,23 @@ class Store:
                 "UPDATE alerts SET notified_at=? WHERE event_key=?",
                 (utc_now(), event_key),
             )
+
+    def cleanup_alerts(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            return 0
+        cutoff = datetime.fromtimestamp(
+            time.time() - retention_days * 86400, timezone.utc
+        ).isoformat()
+        with sqlite3.connect(self.path) as db:
+            cursor = db.execute(
+                """
+                DELETE FROM alerts
+                WHERE created_at<? AND notified_at<>''
+                """,
+                (cutoff,),
+            )
+            return cursor.rowcount
+
 
     def unnotified_alerts(self, profile_id: str, limit: int = 10) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -693,6 +711,9 @@ Client IP: {client_ip}"
             try:
                 iteration += 1
                 if iteration == 1 or iteration % 20 == 0:
+                    removed = self.store.cleanup_alerts(ALERT_RETENTION_DAYS)
+                    if removed:
+                        logging.info("Removed %d old delivered alerts.", removed)
                     denylist = set(client.denylist(profile_id))
                     self.store.replace_denylist(profile_id, list(denylist))
                     logging.info(

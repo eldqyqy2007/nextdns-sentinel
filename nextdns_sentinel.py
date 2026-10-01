@@ -798,6 +798,21 @@ class Store:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                
+                CREATE TABLE IF NOT EXISTS telegram_bots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL DEFAULT 'Telegram Bot',
+                    token TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    bot_username TEXT NOT NULL DEFAULT '',
+                    bot_name TEXT NOT NULL DEFAULT '',
+                    chat_title TEXT NOT NULL DEFAULT '',
+                    last_notification_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    added_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             self._migrate_alert_columns(db)
@@ -886,7 +901,18 @@ class Store:
                 PRIMARY KEY(profile_id, device_id)
             )
         """)
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='denylist'").fetchone():
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_bots'").fetchone():
+            existing=db.execute("SELECT COUNT(*) FROM telegram_bots").fetchone()[0]
+            legacy_token=self.get_secret("telegram_token")
+            legacy_chat=self.get_secret("telegram_chat_id")
+            if not existing and legacy_token and legacy_chat:
+                now=utc_now()
+                db.execute("INSERT INTO telegram_bots(name,token,chat_id,enabled,bot_username,bot_name,chat_title,last_notification_at,last_error,added_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                           ("Telegram Bot",self.cipher.encrypt(legacy_token.encode()).decode(),self.cipher.encrypt(legacy_chat.encode()).decode(),
+                            int(self.get_setting("telegram_enabled","1")=="1"),self.get_setting("telegram_bot_username",""),
+                            self.get_setting("telegram_bot_name",""),self.get_setting("telegram_chat_title",""),"",
+                            self.get_setting("telegram_last_error",""),now,now))
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='denylist'").fetchone():
             db.execute("DELETE FROM denylist WHERE rowid NOT IN (SELECT MAX(rowid) FROM denylist GROUP BY profile_id,domain)")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_denylist_profile_domain_unique ON denylist(profile_id,domain)")
 
@@ -911,6 +937,57 @@ class Store:
                     account.get("added_at", utc_now()),
                 ),
             )
+
+    def telegram_bots(self) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory=sqlite3.Row
+            rows=[dict(r) for r in db.execute("SELECT * FROM telegram_bots ORDER BY id").fetchall()]
+        result=[]
+        for row in rows:
+            try:
+                row["token"]=self.cipher.decrypt(row["token"].encode()).decode()
+                row["chat_id"]=self.cipher.decrypt(row["chat_id"].encode()).decode()
+            except InvalidToken:
+                row["token"]=""; row["chat_id"]=""; row["last_error"]="Stored Telegram credentials could not be decrypted."
+            row["enabled"]=bool(row["enabled"])
+            result.append(row)
+        return result
+
+    def save_telegram_bot(self, bot_id: int | None, name: str, token: str, chat_id: str,
+                          enabled: bool = True, identity: dict[str, Any] | None = None) -> int:
+        identity=identity or {}
+        bot=identity.get("bot") if isinstance(identity.get("bot"),dict) else {}
+        chat=identity.get("chat") if isinstance(identity.get("chat"),dict) else {}
+        now=utc_now()
+        encrypted_token=self.cipher.encrypt(token.encode()).decode()
+        encrypted_chat=self.cipher.encrypt(chat_id.encode()).decode()
+        with sqlite3.connect(self.path) as db:
+            if bot_id:
+                db.execute("UPDATE telegram_bots SET name=?,token=?,chat_id=?,enabled=?,bot_username=?,bot_name=?,chat_title=?,updated_at=? WHERE id=?",
+                           (name or "Telegram Bot",encrypted_token,encrypted_chat,int(enabled),
+                            str(bot.get("username") or ""),str(bot.get("first_name") or ""),
+                            str(chat.get("title") or chat.get("first_name") or chat.get("username") or ""),now,bot_id))
+                return int(bot_id)
+            cur=db.execute("INSERT INTO telegram_bots(name,token,chat_id,enabled,bot_username,bot_name,chat_title,added_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (name or "Telegram Bot",encrypted_token,encrypted_chat,int(enabled),
+                            str(bot.get("username") or ""),str(bot.get("first_name") or ""),
+                            str(chat.get("title") or chat.get("first_name") or chat.get("username") or ""),now,now))
+            return int(cur.lastrowid)
+
+    def set_telegram_bot_enabled(self, bot_id: int, enabled: bool) -> bool:
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute("UPDATE telegram_bots SET enabled=?,updated_at=? WHERE id=?",(int(enabled),utc_now(),bot_id))
+            return cur.rowcount>0
+
+    def delete_telegram_bot(self, bot_id: int) -> bool:
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute("DELETE FROM telegram_bots WHERE id=?",(bot_id,))
+            return cur.rowcount>0
+
+    def mark_telegram_bot_result(self, bot_id: int, ok: bool, error: str = "") -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE telegram_bots SET last_notification_at=?,last_error=?,updated_at=? WHERE id=?",
+                       (utc_now() if ok else "", "" if ok else error, utc_now(), bot_id))
 
     def set_setting(self, key: str, value: str) -> None:
         with sqlite3.connect(self.path) as db:

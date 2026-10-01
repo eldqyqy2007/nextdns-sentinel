@@ -3507,7 +3507,19 @@ async function refresh(){
   const cards=[
     ['Monitored Profiles',s.accounts],['Active Profiles',s.active_accounts],['Alerts Total',s.alerts],['Denylist Entries',s.denylist_entries],['Poll Interval',s.poll_interval_seconds+'s']
   ];
-  for(const [label,value] of cards){const card=document.createElement('div');card.className='card';const l=document.createElement('div');l.className='muted';l.textContent=label;const val=document.createElement('div');val.className='value';val.textContent=value;card.append(l,val);stats.append(card);}
+  const cardTargets={
+    'Monitored Profiles':['profiles','accounts'],
+    'Active Profiles':['overview','profile-health'],
+    'Alerts Total':['security','alerts'],
+    'Denylist Entries':['profiles','denylist'],
+    'Poll Interval':['overview','health']
+  };
+  for(const [label,value] of cards){
+    const card=document.createElement('div');card.className='card';card.style.cursor='pointer';card.tabIndex=0;
+    const l=document.createElement('div');l.className='muted';l.textContent=label;const val=document.createElement('div');val.className='value';val.textContent=value;card.append(l,val);
+    const target=cardTargets[label];if(target){card.onclick=()=>navigateToTarget(target[0],target[1]);card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();navigateToTarget(target[0],target[1]);}}}
+    stats.append(card);
+  }
   const analytics=await api('/api/analytics');renderAnalytics(analytics);renderIntelligence(analytics);loadIncidents();loadDomains();loadSentinelHealth();
   const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
   const heroDot=document.getElementById('hero-dot');heroDot.className='dot '+(s.last_error?'':'ok');setText('hero-status',s.last_error?'Attention required':'Monitoring healthy',s.last_error?'error':'ok');

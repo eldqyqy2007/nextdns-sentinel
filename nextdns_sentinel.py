@@ -2375,16 +2375,47 @@ class Sentinel:
         return send_telegram(self.telegram_token, self.telegram_chat_id, message)
     
     def notify_report(self, title: str, lines: list[str], alert_id: int | None = None) -> bool:
-        if alert_id and self.features:
-            context = self.features.alert_context(alert_id)
-            severity = str(context.get("severity") or "medium").upper()
-            risk = context.get("risk_score", "—")
-            lines = [f"Severity: {severity} · Risk: {risk}/100", *lines]
-        message = "🛡️ NextDNS Sentinel\n\n" + title + "\n" + "\n".join(lines)
-        ok = send_telegram(self.telegram_token, self.telegram_chat_id, message) if self.telegram_token and self.telegram_chat_id else False
+        context = self.features.alert_context(alert_id) if self.features and alert_id else {}
+        title_text = str(title or "Sentinel Event").strip() or "Sentinel Event"
+        title_lower = title_text.lower()
+        if "config" in title_lower or "configuration" in title_lower:
+            event_header = "🔧 Configuration Event"
+        elif "denylist" in title_lower or "blocked" in title_lower:
+            event_header = "🚫 Denylist Event"
+        elif "device" in title_lower:
+            event_header = "📱 Device Event"
+        elif "incident" in title_lower:
+            event_header = "🛡️ Incident Event"
+        elif "monitor" in title_lower:
+            event_header = "⚙️ Monitoring Event"
+        else:
+            event_header = "🛡️ Sentinel Event"
+
+        body_lines = [f"<b>{event_header}</b>", f"<b>{html_escape(title_text)}</b>"]
+        severity = str(context.get("severity") or "").strip()
+        risk = context.get("risk_score")
+        if severity:
+            risk_text = f" · Risk {int(risk)}/100" if isinstance(risk, (int, float)) else ""
+            body_lines.append(f"<b>Risk:</b> {html_escape(severity.upper())}{risk_text}")
+        elif isinstance(risk, (int, float)):
+            body_lines.append(f"<b>Risk:</b> {int(risk)}/100")
+        for line in lines or []:
+            value = str(line or "").strip()
+            if value:
+                body_lines.append(html_escape(value))
+        message = "\n\n".join(body_lines)
+        destinations = self.store.telegram_destinations()
+        delivered = False
+        if destinations:
+            for bot in destinations:
+                ok, reason = send_telegram_result(bot["token"], bot["chat_id"], message, parse_mode="HTML")
+                self.store.mark_telegram_bot_result(int(bot["id"]), ok, "" if ok else reason)
+                delivered = delivered or ok
+        elif self.telegram_token and self.telegram_chat_id:
+            delivered = send_telegram_result(self.telegram_token, self.telegram_chat_id, message, parse_mode="HTML")[0]
         if self.features and alert_id:
-            self.features.delivery(alert_id, "telegram", "sent" if ok else "failed")
-        return ok
+            self.features.delivery(alert_id, "telegram", "sent" if delivered else "failed")
+        return delivered
 
     def enrich_alert(self, event_key: str, account: dict[str, Any], domain: str, reason: str,
                      status: str, matched: str, client_ip: str, event_time: str,

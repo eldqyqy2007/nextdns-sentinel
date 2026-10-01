@@ -2931,24 +2931,16 @@ function renderProfileHealth(items){
   card.append(name,status,poll,failures,err);box.append(card);
  }
 }
-function renderTimeline(health,alerts){
+function renderTimeline(events){
  const box=document.getElementById('event-timeline');box.replaceChildren();
- const events=[];
- for(const item of health||[]){
-  if(item.last_success_at)events.push({time:item.last_success_at,title:(item.name||item.profile_id)+' poll succeeded',detail:'Monitoring checkpoint',kind:'ok'});
-  if(item.last_error_at&&item.last_error)events.push({time:item.last_error_at,title:(item.name||item.profile_id)+' monitor error',detail:item.last_error,kind:'error'});
- }
- for(const alert of (alerts||[]).slice(0,8)){
-  if(alert.event_timestamp)events.push({time:alert.event_timestamp,title:alert.domain||'Alert',detail:(alert.reason||'Security event')+' · '+(alert.status||'unknown'),kind:'warn'});
- }
- events.sort((a,b)=>new Date(b.time)-new Date(a.time));
- setText('timeline-count',events.length+' events','');
- if(!events.length){box.textContent='No timeline events available yet.';return;}
- for(const event of events.slice(0,12)){
+ const items=Array.isArray(events)?events:[];
+ setText('timeline-count',items.length+' events','');
+ if(!items.length){box.textContent='No timeline events available yet.';return;}
+ for(const event of items.slice(0,20)){
   const row=document.createElement('div');row.className='timeline-item';
-  const dot=document.createElement('span');dot.className='timeline-dot '+event.kind;
-  const middle=document.createElement('div');const title=document.createElement('strong');title.textContent=event.title;const detail=document.createElement('div');detail.className='muted';detail.textContent=event.detail;middle.append(title,detail);
-  const time=document.createElement('span');time.className='muted';time.textContent=formatDateTime(event.time);time.title=event.time;
+  const dot=document.createElement('span');dot.className='timeline-dot '+(event.kind||'warn');
+  const middle=document.createElement('div');const title=document.createElement('strong');title.textContent=event.title||'Event';const detail=document.createElement('div');detail.className='muted';detail.textContent=event.detail||'';middle.append(title,detail);
+  const time=document.createElement('span');time.className='muted';time.textContent=formatDateTime(event.time);time.title=event.time||'';
   row.append(dot,middle,time);box.append(row);
  }
 }
@@ -3281,6 +3273,7 @@ async function refresh(){
   const health=document.getElementById('health');health.className='status '+(s.last_error?'error':'ok');health.textContent=s.last_error?'Monitor error: '+s.last_error+' · '+formatDateTime(s.last_error_at):'Monitor healthy · Last successful poll: '+formatDateTime(s.last_success_at);
   const heroDot=document.getElementById('hero-dot');heroDot.className='dot '+(s.last_error?'':'ok');setText('hero-status',s.last_error?'Attention required':'Monitoring healthy',s.last_error?'error':'ok');
   const healthData=await api('/api/health');renderProfileHealth(healthData);
+  const timelineData=await api('/api/timeline');renderTimeline(timelineData);
   const devices=await api('/api/devices');renderDevices(devices);
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
@@ -3493,6 +3486,26 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.get("/api/alerts")
     def api_alerts() -> Any:
         return jsonify(features.alerts(200))
+
+    @app.get("/api/timeline")
+    def api_timeline() -> Any:
+        events=[]
+        for alert in features.alerts(100):
+            events.append({"time":alert.get("event_timestamp") or alert.get("created_at") or "",
+                           "title":alert.get("domain") or str(alert.get("alert_type") or "Security event").replace("_"," ").title(),
+                           "detail":alert.get("reason") or alert.get("status") or "Security event",
+                           "kind":"warn","profile_id":alert.get("profile_id",""),"alert_id":alert.get("id")})
+        for change in store.config_changes(100):
+            events.append({"time":change.get("changed_at") or "","title":"Configuration change",
+                           "detail":f'{change.get("profile_id","")} · {change.get("change_type","")}',
+                           "kind":"config","profile_id":change.get("profile_id",""),"change_id":change.get("id")})
+        for audit in features.audit_entries(100):
+            events.append({"time":audit.get("created_at") or "",
+                           "title":str(audit.get("action") or "Audit event").replace("_"," ").title(),
+                           "detail":audit.get("target_id") or audit.get("target_type") or "Sentinel action",
+                           "kind":"audit","profile_id":audit.get("profile_id",""),"audit_id":audit.get("id")})
+        events.sort(key=lambda item:str(item.get("time") or ""),reverse=True)
+        return jsonify(events[:200])
 
     @app.get("/api/config-changes")
     def api_config_changes() -> Any:

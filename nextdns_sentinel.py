@@ -780,9 +780,13 @@ Client IP: {client_ip}"
                     self.stop_event.wait(max(CHECK_INTERVAL, 10))
                 else:
                     time.sleep(max(CHECK_INTERVAL, 10))
-            except Exception:
+            except Exception as exc:
+                message = str(exc)
                 logging.exception(
                     "Unexpected monitoring error for %s", account["name"]
+                )
+                self.store.set_poll_state(
+                    profile_id, self.store.get_poll_ms(profile_id), message
                 )
                 if self.stop_event:
                     self.stop_event.wait(max(CHECK_INTERVAL, 10))

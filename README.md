@@ -253,7 +253,7 @@ nextdns-sentinel/
 - Losing the Fernet key makes stored API keys unrecoverable.
 - The dashboard is lightweight and intentionally does not implement user authentication.
 
-## <img src="./assets/icons/roadmap.svg" alt="" width="24" height="24" align="absmiddle"> Roadmap
+## <img src="./assets/icons/process.svg" alt="" width="24" height="24" align="absmiddle"> Roadmap
 
 - [x] Resilient API polling and duplicate protection
 - [x] Event context and local monitor health

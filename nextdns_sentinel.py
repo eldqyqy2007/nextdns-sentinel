@@ -2474,13 +2474,20 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         operation_id=features.record_bulk("denylist_"+action,domain,results)
         features.audit("bulk_denylist","all_profiles",domain,details={"action":action,"operation_id":operation_id,"successes":successes,"failures":failures,"skipped":skipped})
         if sentinel.telegram_token and sentinel.telegram_chat_id:
-            sentinel.notify_report("Bulk denylist action",[
+            report_lines=[
                 f"Action: {action.upper()}",
                 f"Domain: {domain}",
                 f"Operation: #{operation_id}",
                 f"Profiles: {len(results)}",
                 f"Success: {successes} · Failed: {failures} · Skipped: {skipped}",
-            ])
+            ]
+            report_lines.extend(
+                f"• {r.get('profile_name') or r.get('profile_id')}: {r.get('status','unknown').upper()} — {r.get('reason','')}"
+                for r in results[:25]
+            )
+            if len(results)>25:
+                report_lines.append(f"• … {len(results)-25} additional profiles omitted from Telegram report.")
+            sentinel.notify_report("Bulk denylist action",report_lines)
         return jsonify({"domain":domain,"action":action,"operation_id":operation_id,"results":results,"successes":successes,"failures":failures,"skipped":skipped})
 
     @app.post("/api/monitor/start")

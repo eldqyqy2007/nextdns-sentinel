@@ -3033,13 +3033,21 @@ function closeProfileEditor(){
 document.getElementById('profile-edit-form').addEventListener('submit',async e=>{
   e.preventDefault();
   if(!editingProfileId)return;
+  const profileId=editingProfileId;
   const data=Object.fromEntries(new FormData(e.target).entries());
+  const submit=e.target.querySelector('button[type="submit"]');
+  if(submit)submit.disabled=true;
+  setText('profile-edit-message','Saving profile changes…','muted');
   try{
-    await api('/api/accounts/'+encodeURIComponent(editingProfileId),{method:'PATCH',body:JSON.stringify(data)});
-    closeProfileEditor();
+    const result=await api('/api/accounts/'+encodeURIComponent(profileId),{method:'PATCH',body:JSON.stringify(data)});
     await refresh();
-    setText('profile-edit-message','Profile changes saved successfully.','ok');
-  }catch(err){setText('profile-edit-message','Save failed: '+err.message,'error');}
+    closeProfileEditor();
+    setText('account-message','Profile '+(result.profile_name||profileId)+' updated successfully.','ok');
+  }catch(err){
+    setText('profile-edit-message','Save failed: '+err.message,'error');
+  }finally{
+    if(submit)submit.disabled=false;
+  }
 });
 
 async function deleteAccount(id){

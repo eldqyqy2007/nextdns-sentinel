@@ -3213,9 +3213,15 @@ function notifyNewDenylistAlerts(alerts){
  const newest=Math.max(lastAlertId,...alerts.map(x=>Number(x.id||0)));
  if(lastAlertId && fresh.length){
    const x=fresh[fresh.length-1];
-   showActionToast('Denylist alert: '+(x.domain||'unknown domain')+' · '+(x.account_name||'profile'),'error');
-   if('Notification' in window && Notification.permission==='granted'){
-     new Notification('NextDNS Sentinel · Denylist match',{body:(x.domain||'Unknown domain')+' on '+(x.account_name||'profile')});
+   const title='NextDNS Sentinel · Denylist match';
+   const body=(x.domain||'Unknown domain')+' on '+(x.account_name||'profile');
+   showActionToast('Denylist alert: '+body,'error');
+   if('Notification' in window && Notification.permission==='granted' && 'serviceWorker' in navigator){
+     navigator.serviceWorker.ready.then(reg=>{
+       if(reg && typeof reg.showNotification==='function'){
+         return reg.showNotification(title,{body,tag:'sentinel-alert-'+String(x.id||''),renotify:false});
+       }
+     }).catch(()=>{});
    }
  } else if(!notificationPermissionRequested && 'Notification' in window && Notification.permission==='default'){
    notificationPermissionRequested=true;

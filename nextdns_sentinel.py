@@ -3961,6 +3961,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             store.set_setting("telegram_bot_name", str(identity["bot"].get("first_name") or ""))
             store.set_setting("telegram_chat_title", str(identity["chat"].get("title") or identity["chat"].get("first_name") or identity["chat"].get("username") or ""))
             store.set_setting("telegram_enabled", "1")
+            store.set_setting("telegram_last_test_at", "")
+            store.set_setting("telegram_last_error", "")
             sentinel.telegram_token = token
             sentinel.telegram_chat_id = chat_id
             features.audit("telegram_configured","settings","telegram",details={"chat_id":chat_id})
@@ -3981,6 +3983,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             "bot_username": store.setting("telegram_bot_username", ""),
             "bot_name": store.setting("telegram_bot_name", ""),
             "chat_title": store.setting("telegram_chat_title", ""),
+            "last_test_at": store.setting("telegram_last_test_at", ""),
+            "last_error": store.setting("telegram_last_error", ""),
         })
 
     @app.post("/api/settings/telegram/enable")
@@ -4011,6 +4015,21 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         features.audit("telegram_disabled","settings","telegram")
         return jsonify({"configured":True,"enabled":False,"status":"disabled"})
 
+    @app.delete("/api/settings/telegram/credentials")
+    def api_telegram_credentials_delete() -> Any:
+        store.set_setting("telegram_enabled","0")
+        store.set_setting("telegram_bot_username","")
+        store.set_setting("telegram_bot_name","")
+        store.set_setting("telegram_chat_title","")
+        store.set_setting("telegram_last_test_at","")
+        store.set_setting("telegram_last_error","")
+        store.delete_secret("telegram_token")
+        store.delete_secret("telegram_chat_id")
+        sentinel.telegram_token = ""
+        sentinel.telegram_chat_id = ""
+        features.audit("telegram_credentials_deleted","settings","telegram")
+        return jsonify({"configured":False,"enabled":False,"status":"disabled"})
+    
     @app.post("/api/settings/telegram/test")
     def api_telegram_test() -> Any:
         if not sentinel.telegram_token or not sentinel.telegram_chat_id or store.setting("telegram_enabled","1")!="1":
@@ -4020,9 +4039,11 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             sentinel.telegram_chat_id,
             "NextDNS Sentinel test notification.",
         )
+        store.set_setting("telegram_last_test_at", utc_now())
+        store.set_setting("telegram_last_error", "" if ok else reason)
         if not ok:
             return jsonify({"error": reason}), 502
-        return jsonify({"sent": True, "message": reason})
+        return jsonify({"sent": True, "message": reason, "tested_at": store.setting("telegram_last_test_at","")})
 
     @app.get("/api/risk-history")
     def api_risk_history() -> Any:

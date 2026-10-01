@@ -992,7 +992,7 @@ class Store:
                   client_ip=excluded.client_ip,last_seen_at=CASE WHEN excluded.last_seen_at<>'' THEN excluded.last_seen_at ELSE device_state.last_seen_at END,
                   last_status=excluded.last_status,last_domain=excluded.last_domain,updated_at=excluded.updated_at,
                   inactive_alerted_at=CASE WHEN excluded.last_seen_at<>'' THEN '' ELSE device_state.inactive_alerted_at END
-            """,(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,utc_now()))
+            """,(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,utc_now(),""))
 
     def mark_device_inactive_alerted(self, profile_id: str, device_id: str) -> bool:
         with sqlite3.connect(self.path) as db:

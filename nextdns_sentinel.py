@@ -1374,22 +1374,44 @@ class Store:
                     self.add_suppression(fingerprint,int(cooldown),"Rule: "+rule["name"]); decision["suppressed"]=True
         return decision
     def export_settings(self) -> dict[str, Any]:
+        # Export only portable, non-secret settings. Authentication hashes and
+        # credential material must never be copied by this feature.
+        excluded_keys = {"api_auth_hash", "api_auth_token", "telegram_token", "telegram_chat_id"}
         with self._connect() as db:
             rows=db.execute("SELECT key,value,updated_at FROM sentinel_settings ORDER BY key").fetchall()
             rules=db.execute("SELECT id,name,enabled,rule_json,created_at,updated_at FROM alert_rules ORDER BY id").fetchall()
-        return {"version":1,"exported_at":now_iso(),"settings":[dict(r) for r in rows],"rules":[{**dict(r),"rule":_loads(r["rule_json"],{})} for r in rules]}
+        settings = [dict(r) for r in rows if r["key"] not in excluded_keys and "token" not in r["key"].lower() and "api_key" not in r["key"].lower()]
+        return {"version":1,"exported_at":now_iso(),"settings":settings,"rules":[{**dict(r),"rule":_loads(r["rule_json"],{})} for r in rules]}
 
     def import_settings(self, payload: dict[str, Any]) -> dict[str, int]:
+        if not isinstance(payload, dict) or payload.get("version", 1) != 1:
+            raise ValueError("Unsupported settings document version.")
         imported_settings=0; imported_rules=0
+        settings = payload.get("settings", [])
+        rules = payload.get("rules", [])
+        if not isinstance(settings, list) or not isinstance(rules, list):
+            raise ValueError("Invalid settings document structure.")
         with self._connect() as db:
-            for item in payload.get("settings", []):
+            for item in settings:
+                if not isinstance(item, dict): continue
                 key=str(item.get("key","")).strip()
-                if not key or "token" in key.lower() or "api_key" in key.lower(): continue
+                if not key or key in {"api_auth_hash","api_auth_token","telegram_token","telegram_chat_id"} or "token" in key.lower() or "api_key" in key.lower(): continue
                 db.execute("INSERT INTO sentinel_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,str(item.get("value","")),now_iso())); imported_settings+=1
-            for item in payload.get("rules", []):
+            for item in rules:
+                if not isinstance(item, dict): continue
                 name=str(item.get("name","")).strip()
-                if not name: continue
-                db.execute("INSERT INTO alert_rules(name,enabled,rule_json,created_at,updated_at) VALUES(?,?,?,?,?)",(name,int(bool(item.get("enabled",True))),json.dumps(item.get("rule") or {}),now_iso(),now_iso())); imported_rules+=1
+                rule=item.get("rule") or {}
+                if not name or not isinstance(rule, dict): continue
+                rule_id=item.get("id")
+                if isinstance(rule_id, int) and rule_id > 0:
+                    existing=db.execute("SELECT id FROM alert_rules WHERE id=?",(rule_id,)).fetchone()
+                else:
+                    existing=None
+                if existing:
+                    db.execute("UPDATE alert_rules SET name=?,enabled=?,rule_json=?,updated_at=? WHERE id=?",(name,int(bool(item.get("enabled",True))),json.dumps(rule),now_iso(),rule_id))
+                else:
+                    db.execute("INSERT INTO alert_rules(name,enabled,rule_json,created_at,updated_at) VALUES(?,?,?,?,?)",(name,int(bool(item.get("enabled",True))),json.dumps(rule),now_iso(),now_iso()))
+                imported_rules+=1
         return {"settings":imported_settings,"rules":imported_rules}
 
     def incident_metrics(self) -> dict[str, Any]:

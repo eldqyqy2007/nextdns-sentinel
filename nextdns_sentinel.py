@@ -1811,12 +1811,21 @@ async function loadDeviceDetail(profileId,deviceId){
   box.scrollIntoView({behavior:'smooth',block:'nearest'});
  }catch(e){setText('operations-center',e.message,'error');}
 }
+async function loadIncidentDetail(id){
+ try{
+  const d=await api('/api/incidents/'+id);const box=document.getElementById('operations-center');box.replaceChildren();
+  const head=document.createElement('div');head.className='mini-item';head.innerHTML='<strong></strong><span></span>';
+  head.firstChild.textContent='#'+d.id+' · '+d.title+' · '+d.status.toUpperCase();head.lastChild.textContent=d.risk_score+'/100 · '+d.severity.toUpperCase();box.append(head);
+  for(const a of d.alerts||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=formatDateTime(a.event_timestamp||a.created_at)+' · '+(a.domain||a.alert_type);row.lastChild.textContent=(a.severity||'medium').toUpperCase()+' · '+(a.risk_score??'—')+'/100';row.title=a.reason||'';box.append(row);}
+  box.scrollIntoView({behavior:'smooth',block:'nearest'});
+ }catch(e){setText('operations-center',e.message,'error');}
+}
 async function loadIncidents(){
  const items=await api('/api/incidents?limit=20');const box=document.getElementById('incidents');box.replaceChildren();
  setText('incident-count',items.length+' incidents','');
  if(!items.length){box.textContent='No correlated incidents yet.';return;}
  for(const x of items){
-  const row=document.createElement('div');row.className='mini-item';
+  const row=document.createElement('div');row.className='mini-item';row.style.cursor='pointer';row.onclick=()=>loadIncidentDetail(x.id);
   const left=document.createElement('div');left.innerHTML='<strong></strong><div class="muted"></div>';
   left.firstChild.textContent='#'+x.id+' · '+x.title+' · '+x.severity.toUpperCase();
   left.lastChild.textContent=x.summary+' · '+x.alert_count+' alert(s) · '+formatDateTime(x.updated_at);

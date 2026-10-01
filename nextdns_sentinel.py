@@ -157,6 +157,58 @@ class FeatureStore:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sentinel_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                rule_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alert_suppressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fingerprint TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                until_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_suppressions_fp ON alert_suppressions(fingerprint, until_at);
+            CREATE TABLE IF NOT EXISTS maintenance_windows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL DEFAULT 'global',
+                profile_id TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                starts_at TEXT NOT NULL,
+                ends_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS escalation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id INTEGER,
+                level INTEGER NOT NULL DEFAULT 1,
+                channel TEXT NOT NULL DEFAULT 'telegram',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS retention_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                retention_days INTEGER NOT NULL,
+                deleted_alerts INTEGER NOT NULL DEFAULT 0,
+                vacuumed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL DEFAULT '',
+                endpoint TEXT NOT NULL DEFAULT '',
+                retry_after REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
             """)
 
     def _domain_intel(self, domain: str) -> dict[str, Any]:
@@ -1294,6 +1346,85 @@ class Store:
                 )
             ]
 
+
+    def setting(self, key: str, default: str = "") -> str:
+        with self._connect() as db:
+            row=db.execute("SELECT value FROM sentinel_settings WHERE key=?",(key,)).fetchone()
+        return str(row[0]) if row else default
+
+    def set_setting(self, key: str, value: Any) -> None:
+        with self._connect() as db:
+            db.execute("INSERT INTO sentinel_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,str(value),now_iso()))
+
+    def rules(self, enabled_only=False):
+        q="SELECT * FROM alert_rules"
+        if enabled_only: q+=" WHERE enabled=1"
+        q+=" ORDER BY id DESC"
+        with self._connect() as db:
+            rows=[dict(r) for r in db.execute(q).fetchall()]
+        for r in rows: r["rule"]=_loads(r.pop("rule_json"),{})
+        return rows
+
+    def save_rule(self, rule_id, name, rule, enabled=True):
+        with self._connect() as db:
+            if rule_id:
+                db.execute("UPDATE alert_rules SET name=?,enabled=?,rule_json=?,updated_at=? WHERE id=?",(name,int(enabled),json.dumps(rule),now_iso(),rule_id))
+                return int(rule_id)
+            cur=db.execute("INSERT INTO alert_rules(name,enabled,rule_json,created_at,updated_at) VALUES(?,?,?,?,?)",(name,int(enabled),json.dumps(rule),now_iso(),now_iso()))
+            return int(cur.lastrowid)
+
+    def delete_rule(self, rule_id):
+        with self._connect() as db: return db.execute("DELETE FROM alert_rules WHERE id=?",(rule_id,)).rowcount>0
+
+    def maintenance_active(self, profile_id=""):
+        now=now_iso()
+        with self._connect() as db:
+            row=db.execute("SELECT * FROM maintenance_windows WHERE starts_at<=? AND ends_at>=? AND (scope='global' OR profile_id=?) ORDER BY ends_at DESC LIMIT 1",(now,now,profile_id)).fetchone()
+        return dict(row) if row else None
+
+    def suppression_active(self, fingerprint):
+        now=now_iso()
+        with self._connect() as db:
+            row=db.execute("SELECT * FROM alert_suppressions WHERE fingerprint=? AND until_at>=? ORDER BY until_at DESC LIMIT 1",(fingerprint,now)).fetchone()
+        return dict(row) if row else None
+
+    def add_suppression(self,fingerprint,seconds,reason=""):
+        until=(datetime.now(timezone.utc)+timedelta(seconds=max(1,int(seconds)))).isoformat()
+        with self._connect() as db:
+            cur=db.execute("INSERT INTO alert_suppressions(fingerprint,reason,until_at,created_at) VALUES(?,?,?,?)",(fingerprint,reason,until,now_iso()))
+        return int(cur.lastrowid)
+
+    def add_maintenance(self,scope,profile_id,seconds,reason=""):
+        start=now_iso(); end=(datetime.now(timezone.utc)+timedelta(seconds=max(1,int(seconds)))).isoformat()
+        with self._connect() as db:
+            cur=db.execute("INSERT INTO maintenance_windows(scope,profile_id,reason,starts_at,ends_at,created_at) VALUES(?,?,?,?,?,?)",(scope,profile_id,reason,start,end,now_iso()))
+        return int(cur.lastrowid)
+
+    def cleanup(self, days):
+        days=max(1,int(days)); cutoff=(datetime.now(timezone.utc)-timedelta(days=days)).isoformat()
+        with self._connect() as db:
+            deleted=0
+            for table in ("delivery_events","incident_alerts","alert_metadata","alerts","audit_log","bulk_operations"):
+                deleted += db.execute(f"DELETE FROM {table} WHERE created_at<?" if table!="incident_alerts" else "DELETE FROM incident_alerts WHERE alert_id NOT IN (SELECT id FROM alerts)", (cutoff,) if table!="incident_alerts" else ()).rowcount
+            db.execute("VACUUM")
+            db.execute("INSERT INTO retention_runs(retention_days,deleted_alerts,vacuumed,created_at) VALUES(?,?,?,?)",(days,deleted,1,now_iso()))
+        return deleted
+
+    def rate_limit_history(self, limit=100):
+        with self._connect() as db: return [dict(r) for r in db.execute("SELECT * FROM rate_limit_events ORDER BY id DESC LIMIT ?",(limit,)).fetchall()]
+
+    def diagnostics(self):
+        checks={}
+        try:
+            with self._connect() as db: db.execute("SELECT 1"); checks["database"]=True
+        except Exception: checks["database"]=False
+        checks["encryption"]=bool(SECRET_KEY)
+        checks["schema"]=all(self._table_exists(t) for t in ("alerts","incidents","audit_log","sentinel_health","alert_rules"))
+        return checks
+
+    def _table_exists(self, name):
+        with self._connect() as db:
+            return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone())
 
 class NextDNSClient:
     BASE = "https://api.nextdns.io"
@@ -3323,6 +3454,68 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not ok:
             return jsonify({"error": "Telegram test notification failed."}), 502
         return jsonify({"sent": True})
+
+    @app.get("/api/control-center")
+    def api_control_center() -> Any:
+        return jsonify({
+            "rules": features.rules(),
+            "maintenance": features.maintenance_active(),
+            "safe_mode": features.setting("safe_mode","0")=="1",
+            "api_auth": bool(features.setting("api_auth_token","")),
+            "diagnostics": features.diagnostics(),
+            "rate_limits": features.rate_limit_history(20),
+        })
+
+    @app.get("/api/rules")
+    def api_rules() -> Any: return jsonify(features.rules())
+
+    @app.post("/api/rules")
+    def api_rule_save() -> Any:
+        data=request_json(); name=str(data.get("name","")).strip()
+        if not name: return jsonify({"error":"Rule name is required."}),400
+        rid=features.save_rule(data.get("id"),name,data.get("rule") or {},bool(data.get("enabled",True)))
+        features.audit("rule_save","rule",str(rid),details={"name":name})
+        return jsonify({"saved":True,"id":rid})
+
+    @app.delete("/api/rules/<int:rule_id>")
+    def api_rule_delete(rule_id:int)->Any:
+        ok=features.delete_rule(rule_id)
+        if ok: features.audit("rule_delete","rule",str(rule_id))
+        return jsonify({"deleted":ok})
+
+    @app.post("/api/suppressions")
+    def api_suppression_add()->Any:
+        data=request_json(); fp=str(data.get("fingerprint","")).strip()
+        seconds=int(data.get("seconds",600)); reason=str(data.get("reason",""))
+        if not fp: return jsonify({"error":"fingerprint is required."}),400
+        sid=features.add_suppression(fp,seconds,reason); features.audit("alert_suppression","alert",fp,details={"seconds":seconds,"reason":reason})
+        return jsonify({"created":True,"id":sid})
+
+    @app.post("/api/maintenance")
+    def api_maintenance_add()->Any:
+        data=request_json(); seconds=int(data.get("seconds",3600)); scope=str(data.get("scope","global")); profile_id=str(data.get("profile_id",""))
+        if scope not in {"global","profile"}: return jsonify({"error":"scope must be global or profile."}),400
+        mid=features.add_maintenance(scope,profile_id,seconds,str(data.get("reason","")))
+        features.audit("maintenance_start","maintenance",str(mid),profile_id,{"seconds":seconds,"scope":scope})
+        sentinel.notify_report("Maintenance mode enabled",[f"Scope: {scope}",f"Profile: {profile_id or 'all'}",f"Duration: {seconds}s"])
+        return jsonify({"created":True,"id":mid})
+
+    @app.post("/api/safe-mode")
+    def api_safe_mode()->Any:
+        enabled=bool(request_json().get("enabled")); features.set_setting("safe_mode","1" if enabled else "0")
+        features.audit("safe_mode","settings","safe_mode",details={"enabled":enabled})
+        return jsonify({"enabled":enabled})
+
+    @app.post("/api/retention")
+    def api_retention()->Any:
+        data=request_json(); days=int(data.get("days",30))
+        deleted=features.cleanup(days); features.audit("database_retention","database",details={"days":days,"deleted":deleted})
+        return jsonify({"deleted":deleted,"days":days})
+
+    @app.get("/api/diagnostics")
+    def api_diagnostics()->Any:
+        result=features.diagnostics(); result["runtime"]=sentinel.is_running(); result["telegram"]=bool(sentinel.telegram_token and sentinel.telegram_chat_id)
+        return jsonify(result)
 
     return app
 

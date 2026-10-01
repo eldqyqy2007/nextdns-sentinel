@@ -212,7 +212,37 @@ class FeatureStore:
                 created_at TEXT NOT NULL
             );
             """)
+            self._migrate_anomaly_baseline_legacy(db)
             self._migrate_unique_constraints(db)
+
+    @staticmethod
+    def _migrate_anomaly_baseline_legacy(db: sqlite3.Connection) -> None:
+        columns={row[1] for row in db.execute("PRAGMA table_info(anomaly_baseline)").fetchall()}
+        if not columns or "bucket_day" in columns:
+            return
+        # Databases created by older Sentinel versions used only profile_id/bucket_hour.
+        # Rebuild the table so the NOT NULL composite key required by current writes exists.
+        db.execute("ALTER TABLE anomaly_baseline RENAME TO anomaly_baseline_legacy")
+        db.execute("""CREATE TABLE anomaly_baseline (
+            profile_id TEXT NOT NULL,
+            bucket_day TEXT NOT NULL,
+            bucket_hour TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(profile_id,bucket_day,bucket_hour)
+        )""")
+        rows=db.execute("SELECT profile_id,bucket_hour,count,updated_at FROM anomaly_baseline_legacy").fetchall()
+        for profile_id,bucket_hour,count,updated_at in rows:
+            try:
+                day=datetime.fromisoformat(str(updated_at).replace("Z","+00:00")).astimezone(timezone.utc).strftime("%Y-%m-%d")
+            except (TypeError,ValueError):
+                day=datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            db.execute("""INSERT INTO anomaly_baseline(profile_id,bucket_day,bucket_hour,count,updated_at)
+                          VALUES(?,?,?,?,?)
+                          ON CONFLICT(profile_id,bucket_day,bucket_hour) DO UPDATE SET
+                          count=anomaly_baseline.count+excluded.count,
+                          updated_at=excluded.updated_at""",(profile_id,str(bucket_hour),str(bucket_hour),int(count or 0),str(updated_at or now_iso())))
+        db.execute("DROP TABLE anomaly_baseline_legacy")
 
     @staticmethod
     def _migrate_unique_constraints(db: sqlite3.Connection) -> None:
@@ -2853,6 +2883,7 @@ DASHBOARD = """<!doctype html>
 <div id="profile-meta" class="meta"></div>
 <div class="status muted">Profile ID is read-only. NextDNS profile changes use the API only.</div>
 <button class="start" type="submit">Save Changes</button>
+<button class="stop" type="button" onclick="clearProfileDenylistFromEditor()">Clear Entire Denylist</button>
 <button class="neutral" type="button" onclick="closeProfileEditor()">Cancel</button>
 </form>
 <div class="status" id="profile-edit-message"></div>
@@ -3477,6 +3508,11 @@ async function editProfile(id){
     setText('profile-edit-message','Unable to load this profile: '+e.message,'error');
   }
 }
+async function clearProfileDenylistFromEditor(){
+ if(!editingProfileId)return;
+ if(!confirm('Remove every denylist entry from this profile? This affects only the selected profile.'))return;
+ try{const d=await api('/api/denylist/'+encodeURIComponent(editingProfileId),{method:'DELETE'});setText('profile-edit-message','Cleared '+(d.removed||0)+' denylist entries.','ok');await refresh();}catch(e){setText('profile-edit-message','Clear denylist failed: '+e.message,'error');}
+}
 function closeProfileEditor(){
   editingProfileId='';
   document.getElementById('profile-editor').classList.add('hidden');
@@ -3536,6 +3572,7 @@ async function renderGroupedDenylist(accounts){
 }
 async function showDenylist(id){
  document.getElementById('deny-profile').value=id;
+ navigateToTarget('profiles','denylist');
  await showSelectedDenylist();
 }
 async function showSelectedDenylist(){
@@ -3618,6 +3655,7 @@ function renderConfigReadable(value,path=''){
  const walk=(obj,prefix)=>{if(obj===null||typeof obj!=='object'){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=prefix||'value';row.lastChild.textContent=String(obj);box.append(row);return;}for(const [key,val] of Object.entries(obj)){const label=(prefix?prefix+'.':'')+key;if(val&&typeof val==='object'&&!Array.isArray(val)){const head=document.createElement('div');head.className='mini-item';head.innerHTML='<strong></strong><span></span>';head.firstChild.textContent=label;head.lastChild.textContent='section';box.append(head);walk(val,label);}else{const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=Array.isArray(val)?(val.length+' item(s)'):String(val);box.append(row);}}};
  walk(value,path);
 }
+function configLabel(label){const raw=String(label??'').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').trim();return raw?raw.charAt(0).toUpperCase()+raw.slice(1):'Value';}
 function buildConfigControl(value,path,label,parent){
  if(value&&typeof value==='object'&&!Array.isArray(value)){
   const details=document.createElement('details');details.open=true;details.style.margin='6px 0';const summary=document.createElement('summary');summary.style.cursor='pointer';summary.textContent=configLabel(label);details.append(summary);
@@ -4319,6 +4357,21 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if not store.account_exists(profile_id):
             return jsonify({"error": "Account not found."}), 404
         return jsonify(store.denylist_entries(profile_id))
+
+    @app.delete("/api/denylist/<profile_id>")
+    def api_denylist_clear(profile_id: str) -> Any:
+        account=next((a for a in store.accounts() if a["profile_id"]==profile_id),None)
+        if not account: return jsonify({"error":"Account not found."}),404
+        try:
+            client=NextDNSClient(account["api_key"]); current=client.denylist(profile_id)
+            for domain in current:
+                client.remove_denylist(profile_id,domain)
+            store.replace_denylist(profile_id,[])
+            key=hashlib.sha256(f"action:denylist_clear:{profile_id}:{utc_now()}".encode()).hexdigest()
+            store.add_alert(profile_id,account["name"],"","",f"All denylist entries removed from Sentinel dashboard","denylist_removed","",utc_now(),key,"configuration_action",source="sentinel_dashboard")
+            features.audit("denylist_clear","profile",profile_id,profile_id,{"removed":len(current)})
+            return jsonify({"cleared":True,"removed":len(current),"entries":[]})
+        except Exception as exc: return jsonify({"error":str(exc)}),400
 
     @app.post("/api/denylist/<profile_id>")
     def api_denylist_add(profile_id: str) -> Any:

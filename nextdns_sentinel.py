@@ -3765,8 +3765,7 @@ window.addEventListener('unhandledrejection',event=>{
  const message=event?.reason?.message||String(event?.reason||'Unknown promise rejection');
  showDashboardError(message);
 });
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dashboardBoot,{once:true});
-else dashboardBoot();
+
 async function loadRiskBaseline(){try{const [risk,base]=await Promise.all([api('/api/risk-history?days=30'),api('/api/baseline')]);const riskText=risk.slice(-10).map(x=>x.day+': avg '+Number(x.avg_risk||0).toFixed(1)+' · max '+x.max_risk+' · '+x.alerts+' alerts').join(' | ');const baseText=base.slice(0,12).map(x=>x.bucket_hour+':00 '+Number(x.baseline||0).toFixed(1)+' avg').join(' · ');setText('control-details','Risk history: '+(riskText||'No data')+' || Baseline: '+(baseText||'No data'),'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');await refresh();await loadControlCenter();}catch(e){setText('control-details',e.message,'error')}}
 async function showConfigDiff(){try{const accounts=await api('/api/accounts');if(!accounts.length){setText('control-details','No profiles configured.','muted');return}const d=await api('/api/config-diff/'+encodeURIComponent(accounts[0].profile_id));setText('control-details',d.changed?d.diff.map(x=>x.field+': '+JSON.stringify(x.before)+' → '+JSON.stringify(x.after)).join(' | '):'No recent configuration diff for '+accounts[0].profile_id,'muted')}catch(e){setText('control-details',e.message,'error')}}
@@ -3810,6 +3809,19 @@ async function loadIncidentMetrics(){const d=await api('/api/incident-metrics');
 async function loadRateLimits(){const d=await api('/api/control-center');setText('control-details',(d.rate_limits||[]).map(x=>x.endpoint+' · retry '+x.retry_after+'s · '+formatDateTime(x.created_at)).join(' | ')||'No rate-limit events recorded.','muted');}
 async function exportSettings(){const d=await api('/api/settings/export');const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='nextdns-sentinel-settings.json';a.click();URL.revokeObjectURL(a.href);}
 async function importSettings(input){if(!input.files?.[0])return;try{const text=await input.files[0].text();const d=await api('/api/settings/import',{method:'POST',body:text});setText('control-details','Imported '+JSON.stringify(d.imported),'ok');loadControlCenter();}catch(e){setText('control-details',e.message,'error')}input.value='';}
+
+
+// Start the dashboard only after every dashboard function has been declared.
+// This prevents initialization from running against the temporal-dead-zone of
+// later const/let declarations and makes boot ordering deterministic.
+function startDashboardWhenReady(){
+ if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',dashboardBoot,{once:true});
+ }else{
+  dashboardBoot();
+ }
+}
+startDashboardWhenReady();
 </script>
 </body>
 </html>"""

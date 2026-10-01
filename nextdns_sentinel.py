@@ -37,6 +37,7 @@ ALERT_RETENTION_DAYS = max(0, int(os.getenv("NEXTDNS_SENTINEL_ALERT_RETENTION_DA
 API_RETRIES = max(0, int(os.getenv("NEXTDNS_SENTINEL_API_RETRIES", "3")))
 NOTIFICATION_RETRY_BASE = max(5, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_BASE", "30")))
 NOTIFICATION_RETRY_MAX = max(NOTIFICATION_RETRY_BASE, int(os.getenv("NEXTDNS_SENTINEL_NOTIFICATION_RETRY_MAX", "900")))
+MAX_NOTIFICATION_ATTEMPTS = max(1, int(os.getenv("NEXTDNS_SENTINEL_MAX_NOTIFICATION_ATTEMPTS", "10")))
 SECRET_KEY = os.getenv("NEXTDNS_SENTINEL_SECRET_KEY", "")
 
 
@@ -288,15 +289,25 @@ class Store:
             next_retry_at = datetime.fromtimestamp(
                 now.timestamp() + delay, timezone.utc
             ).isoformat()
+            notification_status = (
+                "failed" if attempts >= MAX_NOTIFICATION_ATTEMPTS else "pending"
+            )
             db.execute(
                 """
                 UPDATE alerts
                 SET notification_attempts=?,
                     last_notification_attempt_at=?,
-                    next_retry_at=?
+                    next_retry_at=?,
+                    notification_status=?
                 WHERE event_key=? AND notification_status='pending'
                 """,
-                (attempts, now.isoformat(), next_retry_at, event_key),
+                (
+                    attempts,
+                    now.isoformat(),
+                    next_retry_at if notification_status == "pending" else "",
+                    notification_status,
+                    event_key,
+                ),
             )
 
     def cleanup_alerts(self, retention_days: int) -> int:

@@ -64,6 +64,8 @@ class Store:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA busy_timeout=5000")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -92,7 +94,8 @@ class Store:
                     status TEXT NOT NULL DEFAULT '',
                     client_ip TEXT NOT NULL DEFAULT '',
                     event_key TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    notified_at TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_alerts_created_at
@@ -118,6 +121,8 @@ class Store:
             db.execute("ALTER TABLE alerts ADD COLUMN matched_domain TEXT NOT NULL DEFAULT ''")
         if "status" not in columns:
             db.execute("ALTER TABLE alerts ADD COLUMN status TEXT NOT NULL DEFAULT ''")
+        if "notified_at" not in columns:
+            db.execute("ALTER TABLE alerts ADD COLUMN notified_at TEXT NOT NULL DEFAULT ''")
 
     def upsert_account(self, account: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as db:
@@ -205,10 +210,12 @@ class Store:
                     ),
                 )
             return True
-        except sqlite3.IntegrityError:
-            return False
+        except sqlite3.IntegrityError as exc:
+            if "UNIQUE constraint failed: alerts.event_key" in str(exc):
+                return False
+            raise
 
-    def was_recently_alerted(
+    def was_recently_notified(
         self, profile_id: str, domain: str, cooldown_seconds: int
     ) -> bool:
         if cooldown_seconds <= 0:
@@ -221,11 +228,19 @@ class Store:
                 """
                 SELECT 1 FROM alerts
                 WHERE profile_id=? AND domain=? AND created_at>=?
+                  AND notified_at<>''
                 ORDER BY id DESC LIMIT 1
                 """,
                 (profile_id, domain, cutoff),
             ).fetchone()
         return row is not None
+
+    def mark_alert_notified(self, event_key: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE alerts SET notified_at=? WHERE event_key=?",
+                (utc_now(), event_key),
+            )
 
     def set_poll_state(
         self, profile_id: str, last_poll_ms: int, error: str = ""
@@ -282,7 +297,7 @@ class Store:
                 dict(r)
                 for r in db.execute(
                     """
-                    SELECT account_name,domain,matched_domain,reason,status,client_ip,created_at
+                    SELECT account_name,domain,matched_domain,reason,status,client_ip,created_at,notified_at
                     FROM alerts ORDER BY id DESC LIMIT ?
                     """,
                     (limit,),
@@ -526,7 +541,7 @@ class Sentinel:
         status: str,
         matched: str,
         client_ip: str = "",
-    ) -> None:
+    ) -> bool:
         message = (
             "NextDNS Sentinel alert\n\n"
             f"Account: {account['name']}\n"
@@ -538,8 +553,9 @@ class Sentinel:
         )
         if client_ip:
             message += f"\nClient IP: {client_ip}"
-        if self.telegram_token and self.telegram_chat_id:
-            send_telegram(self.telegram_token, self.telegram_chat_id, message)
+        if not self.telegram_token or not self.telegram_chat_id:
+            return False
+        return send_telegram(self.telegram_token, self.telegram_chat_id, message)
 
     def monitor_account(self, account: dict[str, Any]) -> None:
         client = NextDNSClient(account["api_key"])
@@ -580,7 +596,7 @@ class Sentinel:
                     reason = event_reason(log) or "Custom denylist match"
                     client_ip = event_client_ip(log)
 
-                    recently_alerted = self.store.was_recently_alerted(
+                    recently_notified = self.store.was_recently_notified(
                         profile_id, domain, ALERT_COOLDOWN
                     )
                     if self.store.add_alert(
@@ -598,8 +614,8 @@ class Sentinel:
                             account["name"],
                             domain,
                         )
-                        if not recently_alerted:
-                            self.notify(
+                        if not recently_notified:
+                            delivered = self.notify(
                                 account,
                                 domain,
                                 reason,
@@ -607,6 +623,8 @@ class Sentinel:
                                 matched,
                                 client_ip,
                             )
+                            if delivered:
+                                self.store.mark_alert_notified(key)
                         else:
                             logging.info(
                                 "Telegram notification suppressed by cooldown for %s",
@@ -614,9 +632,6 @@ class Sentinel:
                             )
 
                 self.store.set_poll_state(profile_id, now_ms)
-                if len(logs) < 100:
-                    # With fewer than the API limit, the current window is complete.
-                    pass
                 if self.stop_event:
                     self.stop_event.wait(CHECK_INTERVAL)
                 else:

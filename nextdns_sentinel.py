@@ -640,6 +640,27 @@ class NextDNSClient:
         raise NextDNSError(f"NextDNS request failed: {last_error}")
 
 
+    def profiles(self) -> list[dict[str, Any]]:
+        """Return profiles visible to the API key using the account profiles endpoint."""
+        values: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            response = self._get("/profiles", params=params)
+            page = response.get("data", [])
+            if not isinstance(page, list):
+                raise NextDNSError("NextDNS returned an unexpected profiles response.")
+            for item in page:
+                if isinstance(item, dict) and item.get("id"):
+                    values.append(item)
+            next_cursor = response.get("meta", {}).get("pagination", {}).get("cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return values
+
     def denylist(self, profile_id: str) -> list[str]:
         # The current NextDNS API exposes the profile's denylist in the
         # profile representation. Do not send unsupported query parameters
@@ -1156,14 +1177,12 @@ th,td{text-align:left;padding:10px;border-bottom:1px solid #202a3a;font-size:13p
 <div class="panel">
 <h2>NextDNS Profiles</h2>
 <form id="account-form">
-<label>Profile ID<input name="profile_id" required placeholder="NextDNS profile ID"></label>
-<label>Profile name<input name="profile_name" placeholder="Optional profile name"></label>
-<label>Display name<input name="name" required placeholder="Primary Profile"></label>
-<label>API key<input name="api_key" type="password" required placeholder="NextDNS API key"></label>
-<button class="start" type="submit">Add / Update Profile</button>
+<label>NextDNS Account API key<input name="api_key" type="password" required placeholder="NextDNS account API key"></label>
+<button class="neutral" type="button" onclick="discoverProfiles()">Load Profiles</button>
 </form>
 <div class="status" id="account-message"></div>
-<div id="accounts">Loading profiles...</div>
+<div id="profile-picker" class="hidden"></div>
+<div id="accounts">Loading monitored profiles...</div>
 </div>
 
 <div class="panel">
@@ -1206,11 +1225,28 @@ async function api(path,options={}){
   }
 }
 async function controlMonitor(action){try{const d=await api('/api/monitor/'+action,{method:'POST'});setText('runtime',d.running?'Running':'Stopped',d.running?'ok':'muted');refresh();}catch(e){setText('runtime',e.message,'error');}}
-document.getElementById('account-form').addEventListener('submit',async e=>{
- e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());
- try{await api('/api/setup/account',{method:'POST',body:JSON.stringify(d)});setText('account-message','Profile saved and monitoring started.','ok');e.target.reset();refresh();}
- catch(err){setText('account-message',err.message,'error');}
-});
+async function discoverProfiles(){
+ const form=document.getElementById('account-form');const apiKey=form.elements.api_key.value.trim();
+ if(!apiKey){setText('account-message','Enter the NextDNS account API key first.','error');return;}
+ try{
+  const profiles=await api('/api/profiles/discover',{method:'POST',body:JSON.stringify({api_key:apiKey})});
+  const picker=document.getElementById('profile-picker');picker.replaceChildren();picker.className='';
+  if(!profiles.length){setText('account-message','No NextDNS profiles were returned for this API key.','error');return;}
+  const title=document.createElement('div');title.textContent='Select a profile to monitor:';picker.append(title);
+  const select=document.createElement('select');select.id='profile-select';select.style.cssText='width:100%;box-sizing:border-box;background:#0b1019;color:#e8edf7;border:1px solid #303b4e;border-radius:8px;padding:10px;margin:8px 0';
+  for(const p of profiles){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' ('+p.id+')';select.append(o);}picker.append(select);
+  const save=document.createElement('button');save.className='start';save.textContent='Monitor Selected Profile';save.onclick=()=>saveSelectedProfile(apiKey,profiles);picker.append(save);
+  setText('account-message',profiles.length+' profile(s) loaded from NextDNS API.','ok');
+ }catch(err){setText('account-message',err.message,'error');}
+}
+async function saveSelectedProfile(apiKey,profiles){
+ const id=document.getElementById('profile-select').value;const p=profiles.find(x=>x.id===id)||{};
+ try{
+  await api('/api/setup/account',{method:'POST',body:JSON.stringify({api_key:apiKey,profile_id:id,profile_name:p.name||'',name:p.name||''})});
+  setText('account-message','Selected profile is now monitored.','ok');refresh();
+ }catch(err){setText('account-message',err.message,'error');}
+}
+document.getElementById('account-form').addEventListener('submit',e=>{e.preventDefault();discoverProfiles();});
 document.getElementById('telegram-form').addEventListener('submit',async e=>{
  e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());
  try{await api('/api/settings/telegram',{method:'POST',body:JSON.stringify(d)});setText('telegram-status','Telegram configured and encrypted locally.','ok');e.target.reset();refresh();}
@@ -1323,25 +1359,49 @@ def create_app(store: Store, sentinel: Sentinel) -> Flask:
         sentinel.stop()
         return jsonify({"running": False})
 
+    @app.post("/api/profiles/discover")
+    def api_profiles_discover() -> Any:
+        data = request_json()
+        api_key = str(data.get("api_key", "")).strip()
+        if not api_key:
+            return jsonify({"error": "NextDNS API key is required."}), 400
+        try:
+            profiles = NextDNSClient(api_key).profiles()
+            return jsonify([
+                {
+                    "id": str(profile.get("id", "")),
+                    "name": str(profile.get("name") or profile.get("profile_name") or profile.get("id") or "NextDNS Profile"),
+                }
+                for profile in profiles
+                if profile.get("id")
+            ])
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
     @app.post("/api/setup/account")
     def api_setup_account() -> Any:
         data = request_json()
         profile_id = str(data.get("profile_id", "")).strip()
         api_key = str(data.get("api_key", "")).strip()
-        name = str(data.get("name", "")).strip() or "NextDNS Profile"
+        name = str(data.get("name", "")).strip()
         profile_name = str(data.get("profile_name", "")).strip()
 
         if not profile_id or not api_key:
-            return jsonify({"error": "Profile ID and API key are required."}), 400
+            return jsonify({"error": "API key and a profile selected from the API are required."}), 400
 
         try:
-            # Validate the profile and credentials through the NextDNS API only.
-            # No NextDNS web UI or scraping is used.
-            NextDNSClient(api_key).denylist(profile_id)
+            # The profile ID comes from the API response; users never enter it manually.
+            client = NextDNSClient(api_key)
+            profile = client._get(f"/profiles/{profile_id}").get("data", {})
+            if not isinstance(profile, dict):
+                raise NextDNSError(f"NextDNS returned an unexpected profile response for {profile_id}.")
+            resolved_name = profile_name or str(profile.get("name") or profile_id)
+            resolved_display = name or resolved_name
+            client.denylist(profile_id)
             store.upsert_account({
                 "profile_id": profile_id,
-                "name": name,
-                "profile_name": profile_name,
+                "name": resolved_display,
+                "profile_name": resolved_name,
                 "api_key": api_key,
                 "active": True,
                 "added_at": utc_now(),

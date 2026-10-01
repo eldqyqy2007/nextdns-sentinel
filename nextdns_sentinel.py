@@ -2477,6 +2477,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     def api_monitor_start() -> Any:
         try:
             count = sentinel.start()
+            features.audit("monitor_start","runtime","monitor",details={"accounts":count})
+            sentinel.notify_report("Sentinel monitoring started",[f"Active monitoring threads: {count}"])
             return jsonify({"running": sentinel.is_running(), "accounts": count})
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -2484,6 +2486,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.post("/api/monitor/stop")
     def api_monitor_stop() -> Any:
         sentinel.stop()
+        features.audit("monitor_stop","runtime","monitor")
+        sentinel.notify_report("Sentinel monitoring stopped",["Monitoring was stopped from the dashboard."])
         return jsonify({"running": False})
 
     @app.post("/api/profiles/discover")

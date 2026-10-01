@@ -3113,7 +3113,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.before_request
     def safe_mode_guard():
         if request.path.startswith("/api/") and store.setting("api_auth_hash",""):
-            if request.path not in {"/api/auth/status","/api/auth/login","/api/auth/configure"} and not session.get("sentinel_authenticated"):
+            if request.path not in {"/api/auth/status","/api/auth/login","/api/auth/configure","/api/auth/logout"} and not session.get("sentinel_authenticated"):
                 token=request.headers.get("Authorization","")
                 supplied=token[7:] if token.lower().startswith("bearer ") else ""
                 if not supplied or not hashlib.sha256(supplied.encode()).hexdigest()==store.setting("api_auth_hash",""):

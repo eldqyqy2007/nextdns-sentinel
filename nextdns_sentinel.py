@@ -2623,6 +2623,11 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             if was_running:
                 sentinel.start()
             features.audit("local_profile_update","profile",profile_id,profile_id,{"display_name":display_name,"profile_name":profile_name,"api_key_rotated":bool(new_api_key)})
+            sentinel.notify_report("Profile settings updated",[
+                f"Profile: {profile_id}",
+                f"Display name: {display_name}",
+                f"API key rotated: {'yes' if new_api_key else 'no'}",
+            ])
             return jsonify({
                 "saved": True,
                 "profile_id": profile_id,
@@ -2683,6 +2688,10 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             sentinel.stop()
         store.set_account_active(profile_id, active)
         features.audit("profile_monitor_toggle","profile",profile_id,profile_id,{"active":active})
+        sentinel.notify_report("Profile monitoring changed",[
+            f"Profile: {profile_id}",
+            f"Monitoring: {'enabled' if active else 'disabled'}",
+        ])
         if active:
             try:
                 sentinel.start()
@@ -2696,6 +2705,10 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             return jsonify({"error": "Account not found."}), 404
         sentinel.stop()
         features.audit("profile_delete","profile",profile_id,profile_id,{"profile_id":profile_id})
+        sentinel.notify_report("Profile removed from Sentinel",[
+            f"Profile: {profile_id}",
+            "Local monitoring state was deleted.",
+        ])
         store.delete_account(profile_id)
         remaining = [a for a in store.accounts() if a["active"]]
         if remaining:

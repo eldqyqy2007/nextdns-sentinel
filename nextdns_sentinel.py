@@ -387,7 +387,7 @@ class Store:
             domains = db.execute("SELECT COUNT(*) FROM denylist").fetchone()[0]
             state = db.execute(
                 """
-                SELECT last_success_at,last_error
+                SELECT last_success_at,last_error,last_error_at
                 FROM monitor_state
                 ORDER BY CASE WHEN last_success_at='' THEN 0 ELSE 1 END DESC,
                          last_success_at DESC
@@ -410,6 +410,18 @@ class Store:
                 "denylist_entries": domains,
                 "last_success_at": state[0] if state else "",
                 "last_error": error_state[0] if error_state else "",
+                "last_error_at": (
+                    db.execute(
+                        """
+                        SELECT last_error_at
+                        FROM monitor_state
+                        WHERE last_error<>''
+                        ORDER BY last_error_at DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()[0]
+                    if error_state else ""
+                ),
                 "poll_interval_seconds": CHECK_INTERVAL,
             }
 
@@ -999,7 +1011,7 @@ async function refresh(){
     const stats=document.querySelector('#stats');
     stats.replaceChildren();
     for(const [k,v] of Object.entries(s)){
-      if(k==='last_success_at'||k==='last_error') continue;
+      if(k==='last_success_at'||k==='last_error'||k==='last_error_at') continue;
       const card=document.createElement('div');
       card.className='card';
       const label=document.createElement('div');
@@ -1014,7 +1026,7 @@ async function refresh(){
     const health=document.querySelector('#health');
     health.className='status';
     health.textContent=s.last_error
-      ? 'Monitor error: '+s.last_error
+      ? 'Monitor error: '+s.last_error+' · '+(s.last_error_at||'')
       : 'Monitor healthy · Last successful poll: '+(s.last_success_at||'not available');
     if(s.last_error) health.classList.add('error');
 

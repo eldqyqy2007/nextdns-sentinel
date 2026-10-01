@@ -16,6 +16,7 @@ import statistics
 from collections import Counter
 import hashlib
 import json
+from html import escape as html_escape
 import logging
 import os
 import sqlite3
@@ -2109,7 +2110,8 @@ def validate_telegram_credentials(token: str, chat_id: str) -> dict[str, Any]:
 
 
 def send_telegram_result(
-    token: str, chat_id: str, message: str, retries: int = API_RETRIES
+    token: str, chat_id: str, message: str, retries: int = API_RETRIES,
+    parse_mode: str = "HTML",
 ) -> tuple[bool, str]:
     if not token or not chat_id:
         return False, "Telegram is not configured."
@@ -2119,7 +2121,12 @@ def send_telegram_result(
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                data={"chat_id": chat_id, "text": message},
+                data={
+                    "chat_id": chat_id,
+                    "text": message,
+                    "parse_mode": parse_mode,
+                    "disable_web_page_preview": "true",
+                },
                 timeout=HTTP_TIMEOUT,
             )
             if response.ok:
@@ -2191,40 +2198,67 @@ class Sentinel:
         alert_id: int | None = None,
     ) -> bool:
         context = self.features.alert_context(alert_id) if self.features and alert_id else {}
-        severity = str(context.get("severity") or "medium").upper()
-        risk_score = context.get("risk_score", "—")
-        incident_id = context.get("incident_id", "—")
-        domain_risk = str(context.get("domain_risk") or "low").upper()
-        title = "NextDNS Sentinel Security Alert"
-        lines = [
-            f"🚨 {title}",
-            "",
-            f"Severity: {severity} · Risk: {risk_score}/100",
-            f"Type: {status or 'security_event'}",
-            f"Profile: {account['name']}",
-            f"Domain: {domain or 'n/a'}",
-            f"Matched: {matched or 'n/a'}",
-            f"Domain Risk: {domain_risk}",
-            f"Reason: {reason or 'Security event'}",
-            f"Event Time: {event_time or 'n/a'}",
-            f"Detected At: {utc_now()}",
-        ]
-        if incident_id not in ("", "—", None):
-            lines.append(f"Incident: #{incident_id}")
+        alert_type = str(context.get("alert_type") or status or "security_event").lower()
+        severity = str(context.get("severity") or "").strip()
+        risk_score = context.get("risk_score")
+        domain_risk = str(context.get("domain_risk") or "").strip()
+        incident_id = context.get("incident_id")
+        type_titles = {
+            "denylist_match": "🚫 Blocked Site Access",
+            "denylist_added": "➕ Denylist Change",
+            "denylist_removed": "➖ Denylist Change",
+            "config_changed": "🔧 Config Change",
+            "configuration_action": "🔧 Configuration Action",
+            "configuration_undo": "↩️ Configuration Undo",
+            "device_inactive": "📱 Device Inactive",
+            "device_new": "📱 New Device",
+            "security_event": "🛡️ Security Event",
+        }
+        title = type_titles.get(alert_type, "🛡️ Security Event")
+        profile = html_escape(str(account.get("name") or account.get("profile_id") or "Profile"))
+        lines=[f"<b>{title} — {profile}</b>"]
+        if severity:
+            risk_text=f" · Risk {int(risk_score)}/100" if isinstance(risk_score,(int,float)) else ""
+            lines.append(f"<b>Risk:</b> {html_escape(severity.upper())}{risk_text}")
+        elif isinstance(risk_score,(int,float)):
+            lines.append(f"<b>Risk:</b> {int(risk_score)}/100")
+        if domain_risk:
+            lines.append(f"<b>Domain Risk:</b> {html_escape(domain_risk.upper())}")
+        if domain:
+            lines.append(f"<b>Domain:</b> <code>{html_escape(domain)}</code>")
+        if matched and matched != domain:
+            lines.append(f"<b>Matched:</b> <code>{html_escape(matched)}</code>")
         if device_name or device_id:
-            lines.append(f"Device: {device_name or device_id}")
+            lines.append(f"<b>Device:</b> {html_escape(device_name or device_id)}")
         if device_model:
-            lines.append(f"Model: {device_model}")
+            lines.append(f"<b>Model:</b> {html_escape(device_model)}")
         if client_ip:
-            lines.append(f"Client IP: {client_ip}")
+            lines.append(f"<b>Client IP:</b> <code>{html_escape(client_ip)}</code>")
         if protocol:
-            lines.append(f"Protocol: {protocol}")
+            lines.append(f"<b>Protocol:</b> {html_escape(protocol)}")
         if encrypted:
-            lines.append("Encrypted: yes")
+            lines.append("<b>Encrypted:</b> Yes")
+        if reason:
+            lines.append(f"<b>Reason:</b> {html_escape(reason)}")
+        if alert_type in {"config_changed","configuration_action","configuration_undo"} and self.features:
+            changes=self.store.config_changes(50)
+            latest=next((item for item in changes if item.get("profile_id")==account.get("profile_id")),None)
+            if latest and latest.get("change_type"):
+                lines.append(f"<b>Change:</b> {html_escape(str(latest['change_type']))}")
+        if incident_id:
+            lines.append(f"<b>Incident:</b> #{html_escape(str(incident_id))}")
+        if event_time:
+            try:
+                dt=datetime.fromisoformat(str(event_time).replace("Z","+00:00"))
+                if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+                stamp=dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except ValueError:
+                stamp=event_time
+            lines.append(f"<b>Time:</b> {html_escape(stamp)}")
         if not self.telegram_token or not self.telegram_chat_id:
             return False
         return send_telegram(self.telegram_token, self.telegram_chat_id, "\n".join(lines))
-
+    
     def notify_report(self, title: str, lines: list[str], alert_id: int | None = None) -> bool:
         if alert_id and self.features:
             context = self.features.alert_context(alert_id)

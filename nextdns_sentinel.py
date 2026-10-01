@@ -2858,7 +2858,7 @@ async function api(path,options={}){
     throw error;
   }
 }
-async function controlMonitor(action){try{const d=await api('/api/monitor/'+action,{method:'POST'});setText('runtime',d.running?'Running':'Stopped',d.running?'ok':'muted');refresh();}catch(e){setText('runtime',e.message,'error');}}
+async function controlMonitor(action){try{const d=await api('/api/monitor/'+action,{method:'POST'});setText('runtime',d.running?'Running':'Stopped',d.running?'ok':'muted');await refresh();showActionToast(action==='start'?'Monitoring started.':'Monitoring stopped.','ok');}catch(e){setText('runtime',e.message,'error');}}
 async function discoverProfiles(){
  const form=document.getElementById('account-form');const apiKey=form.elements.api_key.value.trim();
  if(!apiKey){setText('account-message','Enter the NextDNS account API key first.','error');return;}
@@ -3080,6 +3080,25 @@ async function exportAlertLogs(){
 }
 document.getElementById('save-alert-logs').addEventListener('change',e=>setAlertLogSaving(e.target.checked));
 
+let lastAlertId=Number(localStorage.getItem('sentinel_last_alert_id')||0);
+let notificationPermissionRequested=false;
+function notifyNewDenylistAlerts(alerts){
+ const fresh=alerts.filter(x=>Number(x.id||0)>lastAlertId && String(x.alert_type||'')==='denylist_match');
+ const newest=Math.max(lastAlertId,...alerts.map(x=>Number(x.id||0)));
+ if(lastAlertId && fresh.length){
+   const x=fresh[fresh.length-1];
+   showActionToast('Denylist alert: '+(x.domain||'unknown domain')+' · '+(x.account_name||'profile'),'error');
+   if('Notification' in window && Notification.permission==='granted'){
+     new Notification('NextDNS Sentinel · Denylist match',{body:(x.domain||'Unknown domain')+' on '+(x.account_name||'profile')});
+   }
+ } else if(!notificationPermissionRequested && 'Notification' in window && Notification.permission==='default'){
+   notificationPermissionRequested=true;
+   Notification.requestPermission().catch(()=>{});
+ }
+ if(newest>lastAlertId) localStorage.setItem('sentinel_last_alert_id',String(newest));
+ lastAlertId=Math.max(lastAlertId,newest);
+}
+
 async function refresh(){
  try{
   const rt=await api('/api/runtime');setText('runtime',rt.running?'Running':'Stopped',rt.running?'ok':'muted');
@@ -3125,7 +3144,7 @@ async function refresh(){
   if(oldCfg && [...cfgSelect.options].some(o=>o.value===oldCfg))cfgSelect.value=oldCfg;
   if(oldDeny && [...denySelect.options].some(o=>o.value===oldDeny))denySelect.value=oldDeny;
   if(denySelect.value && localStorage.getItem('sentinel_active_page')==='profiles') await showSelectedDenylist();
-  const alerts=await api('/api/alerts');const body=document.getElementById('alerts');body.replaceChildren();
+  const alerts=await api('/api/alerts');notifyNewDenylistAlerts(alerts);const body=document.getElementById('alerts');body.replaceChildren();
   renderTimeline(healthData,alerts);
   for(const x of alerts){
    const tr=document.createElement('tr');if(!x.seen_at)tr.style.background='rgba(53,199,111,.10)';
@@ -3171,7 +3190,7 @@ function toggleSidebar(force){
  const open=typeof force==='boolean'?force:!s.classList.contains('open');s.classList.toggle('open',open);
 }
 async function loadRiskBaseline(){try{const [risk,base]=await Promise.all([api('/api/risk-history?days=30'),api('/api/baseline')]);const riskText=risk.slice(-10).map(x=>x.day+': avg '+Number(x.avg_risk||0).toFixed(1)+' · max '+x.max_risk+' · '+x.alerts+' alerts').join(' | ');const baseText=base.slice(0,12).map(x=>x.bucket_hour+':00 '+Number(x.baseline||0).toFixed(1)+' avg').join(' · ');setText('control-details','Risk history: '+(riskText||'No data')+' || Baseline: '+(baseText||'No data'),'muted')}catch(e){setText('control-details',e.message,'error')}}
-async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');}catch(e){setText('control-details',e.message,'error')}}
+async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');await refresh();await loadControlCenter();}catch(e){setText('control-details',e.message,'error')}}
 async function showConfigDiff(){try{const accounts=await api('/api/accounts');if(!accounts.length){setText('control-details','No profiles configured.','muted');return}const d=await api('/api/config-diff/'+encodeURIComponent(accounts[0].profile_id));setText('control-details',d.changed?d.diff.map(x=>x.field+': '+JSON.stringify(x.before)+' → '+JSON.stringify(x.after)).join(' | '):'No recent configuration diff for '+accounts[0].profile_id,'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function configureApiAuth(){
  const token=document.getElementById('api-auth-token').value.trim();if(!token)return alert('Enter an API token.');

@@ -234,6 +234,7 @@ class Store:
                 last_status TEXT NOT NULL DEFAULT '',
                 last_domain TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
+                inactive_alerted_at TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(profile_id, device_id)
             )
         """)
@@ -380,18 +381,23 @@ class Store:
         device_id=device_id or "__UNIDENTIFIED__"
         with sqlite3.connect(self.path) as db:
             db.execute("""
-                INSERT INTO device_state(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?)
+                INSERT INTO device_state(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at,inactive_alerted_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(profile_id,device_id) DO UPDATE SET
                   device_name=excluded.device_name,device_model=excluded.device_model,
                   client_ip=excluded.client_ip,last_seen_at=CASE WHEN excluded.last_seen_at<>'' THEN excluded.last_seen_at ELSE device_state.last_seen_at END,
                   last_status=excluded.last_status,last_domain=excluded.last_domain,updated_at=excluded.updated_at
             """,(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,utc_now()))
 
+    def mark_device_inactive_alerted(self, profile_id: str, device_id: str) -> bool:
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute("UPDATE device_state SET inactive_alerted_at=? WHERE profile_id=? AND device_id=? AND inactive_alerted_at=''",(utc_now(),profile_id,device_id))
+            return cur.rowcount>0
+
     def device_states(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
             db.row_factory=sqlite3.Row
-            return [dict(r) for r in db.execute("SELECT profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at FROM device_state ORDER BY device_name,device_id")]
+            return [dict(r) for r in db.execute("SELECT profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at,inactive_alerted_at FROM device_state ORDER BY device_name,device_id")]
 
     def accounts(self) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -1335,6 +1341,22 @@ class Sentinel:
                     protocol=event_protocol(log)
                     encrypted=event_encrypted(log)
                     self.store.update_device_state(profile_id,device_id,device_name,device_model,client_ip,event_time,status,domain)
+
+                    for device in self.store.device_states():
+                        if device["profile_id"] != profile_id or not device["last_seen_at"] or device.get("inactive_alerted_at"):
+                            continue
+                        try:
+                            last_dt=datetime.fromisoformat(str(device["last_seen_at"]).replace("Z","+00:00"))
+                            age=(datetime.now(timezone.utc)-last_dt).total_seconds()
+                            if age >= DEVICE_INACTIVITY_SECONDS and self.store.mark_device_inactive_alerted(profile_id,device["device_id"]):
+                                key=hashlib.sha256(("inactive:"+profile_id+":"+device["device_id"]+":"+device["last_seen_at"]).encode()).hexdigest()
+                                reason="No recent DNS activity detected; DNS may be inactive on this device."
+                                self.store.add_alert(profile_id,account["name"],"","",reason,"device_inactive",device.get("client_ip",""),device["last_seen_at"],key,"device_inactive",device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"")
+                                delivered=self.notify(account,"",reason,"device_inactive","",device.get("client_ip",""),device["last_seen_at"],device.get("device_id",""),device.get("device_name",""),device.get("device_model",""),"")
+                                if delivered: self.store.mark_alert_notified(key)
+                                else: self.store.mark_notification_failed(key)
+                        except (TypeError,ValueError):
+                            continue
 
                     recently_notified = self.store.was_recently_notified(
                         profile_id, domain, ALERT_COOLDOWN

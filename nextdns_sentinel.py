@@ -1338,12 +1338,15 @@ class Store:
         with sqlite3.connect(self.path) as db:
             rows = db.execute(
                 """
-                SELECT event_timestamp,domain,status
+                SELECT COALESCE(NULLIF(event_timestamp,''),created_at),domain,status
                 FROM alerts
-                WHERE event_timestamp >= ?
-                ORDER BY event_timestamp ASC
+                WHERE (
+                    (event_timestamp >= ? AND event_timestamp <> '')
+                    OR (event_timestamp = '' AND created_at >= ?)
+                )
+                ORDER BY created_at ASC
                 """,
-                (start_iso,),
+                (start_iso, start_iso),
             ).fetchall()
         buckets: dict[str, int] = {}
         for i in range(hours):
@@ -1955,7 +1958,23 @@ def matched_domain(log: dict[str, Any]) -> str:
 
 def event_timestamp(log: dict[str, Any]) -> str:
     value = log.get("timestamp") or log.get("time") or ""
-    return str(value).strip()
+    if value in ("", None):
+        return utc_now()
+    raw = str(value).strip()
+    try:
+        numeric = float(raw)
+        if numeric > 10_000_000_000:
+            numeric /= 1000.0
+        return datetime.fromtimestamp(numeric, timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return raw
 
 
 def event_status(log: dict[str, Any]) -> str:

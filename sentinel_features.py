@@ -133,10 +133,11 @@ class FeatureStore:
 
             CREATE TABLE IF NOT EXISTS anomaly_baseline (
                 profile_id TEXT NOT NULL,
+                bucket_day TEXT NOT NULL,
                 bucket_hour TEXT NOT NULL,
                 count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY(profile_id, bucket_hour)
+                PRIMARY KEY(profile_id, bucket_day, bucket_hour)
             );
 
             CREATE TABLE IF NOT EXISTS sentinel_health (
@@ -188,10 +189,11 @@ class FeatureStore:
             dt = datetime.fromisoformat(str(when).replace('Z', '+00:00'))
         except ValueError:
             dt = datetime.now(timezone.utc)
+        bucket_day = dt.astimezone(timezone.utc).strftime('%Y-%m-%d')
         bucket = dt.astimezone(timezone.utc).strftime('%H')
         with self._connect() as db:
             rows = db.execute(
-                "SELECT count FROM anomaly_baseline WHERE profile_id=? AND bucket_hour=?",
+                "SELECT count FROM anomaly_baseline WHERE profile_id=? AND bucket_hour=? ORDER BY bucket_day DESC LIMIT 30",
                 (profile_id, bucket),
             ).fetchall()
         if len(rows) < 3:
@@ -333,8 +335,12 @@ class FeatureStore:
     def alert_context(self, alert_id: int) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute(
-                """SELECT a.*,m.severity,m.risk_score,m.risk_factors,m.correlation_id,m.anomaly_score,m.domain_risk
-                   FROM alerts a LEFT JOIN alert_metadata m ON m.alert_id=a.id WHERE a.id=?""",(alert_id,)
+                """SELECT a.*,m.severity,m.risk_score,m.risk_factors,m.correlation_id,m.anomaly_score,m.domain_risk,
+                          i.id AS incident_id
+                   FROM alerts a LEFT JOIN alert_metadata m ON m.alert_id=a.id
+                   LEFT JOIN incident_alerts ia ON ia.alert_id=a.id
+                   LEFT JOIN incidents i ON i.id=ia.incident_id
+                   WHERE a.id=?""",(alert_id,)
             ).fetchone()
             return dict(row) if row else {}
 

@@ -2928,7 +2928,10 @@ async function editProfile(id){
     document.getElementById('profile-editor').classList.remove('hidden');
     setText('profile-edit-message','Live profile information loaded from NextDNS API.','ok');
     document.getElementById('profile-editor').scrollIntoView({behavior:'smooth',block:'nearest'});
-  }catch(e){setText('profile-edit-message',e.message,'error');}
+  }catch(e){
+    document.getElementById('profile-editor').classList.remove('hidden');
+    setText('profile-edit-message','Unable to load this profile: '+e.message,'error');
+  }
 }
 function closeProfileEditor(){
   editingProfileId='';
@@ -2948,7 +2951,7 @@ document.getElementById('profile-edit-form').addEventListener('submit',async e=>
 });
 
 async function deleteAccount(id){if(!confirm('Delete this profile and its local state?'))return;try{await api('/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});refresh();}catch(e){alert(e.message);}}
-async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});refresh();}catch(e){alert(e.message);}}
+async async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});await refresh();setText('account-message',active?'Profile enabled successfully.':'Profile disabled successfully.','ok');}catch(e){setText('account-message','Action failed: '+e.message,'error');}}
 async function showDenylist(id){
  document.getElementById('deny-profile').value=id;
  await showSelectedDenylist();
@@ -3696,7 +3699,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             current_profile_name = str(profile.get("name") or profile_id)
             if profile_name != current_profile_name:
                 client.update_profile_name(profile_id, profile_name)
-            client.denylist(profile_id)
+            # Editing local/API profile identity must not depend on denylist availability.
             if was_running:
                 sentinel.stop()
             store.upsert_account({

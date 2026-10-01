@@ -3611,90 +3611,161 @@ async function refresh(){
   filterAlerts();
  }catch(e){setText('health','Dashboard error: '+e.message,'error');showActionToast('Refresh failed: '+e.message,'error');}
 }
+function dashboardErrorMessage(error){
+ const message=error?.message||String(error||'Unknown dashboard error');
+ console.error('NextDNS Sentinel dashboard error:',error);
+ return message;
+}
+function showDashboardError(message){
+ const health=document.getElementById('health');
+ if(health){health.className='status error';health.textContent='Dashboard error: '+message;}
+ if(typeof showActionToast==='function')showActionToast('Dashboard error: '+message,'error');
+}
 function bindDashboardListener(id,event,handler){
  const el=document.getElementById(id);
  if(el)el.addEventListener(event,handler);
 }
-function dashboardBoot(){
- try{
-  setupDashboardPages();
-  showPage(localStorage.getItem('sentinel_active_page')||'overview');
-  detectDevice();
-  window.addEventListener('resize',detectDevice);
-  bindDashboardListener('alert-search','input',filterAlerts);
-  bindDashboardListener('alert-type-filter','change',filterAlerts);
-  loadAlertLogSettings();
-  loadConfigChanges();
-  loadControlCenter();
-  refresh();
-  setInterval(()=>{refresh();loadConfigChanges();loadControlCenter()},5000);
- }catch(error){
-  console.error('Dashboard boot failed',error);
-  const health=document.getElementById('health');
-  if(health)health.textContent='Dashboard initialization error: '+(error?.message||error);
- }
-}
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dashboardBoot,{once:true});
-else dashboardBoot();
-function setupDashboardPages(){
- const map={
+function dashboardPagePanelIds(){
+ return {
   overview:['stats','health','profile-health','event-timeline','hero-dot','runtime'],
-  analytics:['alert-chart','risk-overview','sentinel-health'],
-  devices:['device-activity'],
-  security:['incidents','domain-intelligence','global-search','operations-center','alerts','alert-search'],
-  profiles:['account-form','config-changes','config-section','denylist','deny-domain'],
-  notifications:['telegram-form'],
-  operations:['control-summary','rule-name','maintenance-seconds','control-details'],
-  data:['restore-file','save-alert-logs']
+  analytics:['alert-chart','top-domains','risk-overview','sentinel-health'],
+  devices:['device-activity','device-editor'],
+  security:['incidents','domain-intelligence','global-search','operations-center','alerts','alert-search','alert-type-filter'],
+  profiles:['account-form','accounts','profile-editor','config-changes','config-profile','config-readable','config-form','config-section','deny-profile','deny-domain','denylist'],
+  notifications:['telegram-form','telegram-status','telegram-bot-card','telegram-editor'],
+  operations:['control-summary','rules-list','maintenance-seconds','suppression-fingerprint','control-details','api-auth-token'],
+  data:['restore-form','restore-file','save-alert-logs','alert-log-status']
  };
- document.querySelectorAll('.panel').forEach(p=>{p.dataset.page='';for(const [page,ids] of Object.entries(map)){if(ids.some(id=>p.querySelector('#'+id))){p.dataset.page=page;break}}});
- const stats=document.getElementById('stats');if(stats)stats.dataset.page='overview';
+}
+function topLevelDashboardPanel(el){
+ if(!el)return null;
+ let panel=el.closest('.panel');
+ if(!panel)return null;
+ const main=document.querySelector('.app-content main');
+ if(!main)return panel;
+ while(panel.parentElement && panel.parentElement!==main){
+  panel=panel.parentElement.closest('.panel');
+  if(!panel)break;
+ }
+ return panel;
+}
+function setupDashboardPages(){
+ const map=dashboardPagePanelIds();
+ const pageByPanel=new Map();
+ for(const [page,ids] of Object.entries(map)){
+  for(const id of ids){
+   const panel=topLevelDashboardPanel(document.getElementById(id));
+   if(panel&&!pageByPanel.has(panel))pageByPanel.set(panel,page);
+  }
+ }
+ const main=document.querySelector('.app-content main');
+ if(main){
+  main.querySelectorAll(':scope > .panel').forEach(panel=>{
+   panel.dataset.page=pageByPanel.get(panel)||'';
+  });
+ }
+ const stats=document.getElementById('stats');
+ if(stats)stats.dataset.page='overview';
 }
 function navigateToTarget(page,targetId){
+ const allowed=Object.prototype.hasOwnProperty.call(dashboardPagePanelIds(),page)?page:'overview';
  const target=targetId?String(targetId):'';
- if(!target){showPage(page);return;}
- const current=localStorage.getItem('sentinel_active_page')||'overview';
- if(current===page){showPage(page);requestAnimationFrame(()=>document.getElementById(target)?.scrollIntoView({behavior:'smooth',block:'start'}));}
- else{sessionStorage.setItem('sentinel_scroll_target',target);showPage(page);}
+ if(target){
+  const targetEl=document.getElementById(target);
+  if(!targetEl)console.warn('Dashboard target not found:',target);
+ }
+ if((localStorage.getItem('sentinel_active_page')||'overview')===allowed){
+  showPage(allowed);
+  if(target)requestAnimationFrame(()=>document.getElementById(target)?.scrollIntoView({behavior:'smooth',block:'start'}));
+ }else{
+  if(target)sessionStorage.setItem('sentinel_scroll_target',target);
+  showPage(allowed);
+ }
 }
 function scrollToPendingTarget(page){
- const target=sessionStorage.getItem('sentinel_scroll_target');if(!target)return;
+ const target=sessionStorage.getItem('sentinel_scroll_target');
+ if(!target)return;
  sessionStorage.removeItem('sentinel_scroll_target');
  setTimeout(()=>document.getElementById(target)?.scrollIntoView({behavior:'smooth',block:'start'}),80);
 }
 function showPage(page){
- localStorage.setItem('sentinel_active_page',page);
+ const allowed=Object.prototype.hasOwnProperty.call(dashboardPagePanelIds(),page)?page:'overview';
+ localStorage.setItem('sentinel_active_page',allowed);
  setupDashboardPages();
- document.querySelectorAll('.panel[data-page]').forEach(p=>{p.style.display=p.dataset.page===page?'block':'none'});document.querySelectorAll('.panel[data-page=""]').forEach(p=>p.style.display='none');
- const stats=document.getElementById('stats');if(stats)stats.style.display=page==='overview'?'grid':'none';
- document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
- if(page==='analytics'){loadRangeAnalytics();loadRiskBaseline();}
- if(page==='operations')loadControlCenter();
- if(page==='security'){loadIncidents();loadDomains();}
- if(page==='devices')refresh();
- if(page==='profiles')loadConfigChanges();
-
- if(page==='data')loadAlertLogSettings();
+ const main=document.querySelector('.app-content main');
+ if(main){
+  main.querySelectorAll(':scope > .panel[data-page]').forEach(panel=>{
+   panel.style.display=panel.dataset.page===allowed?'block':'none';
+  });
+  main.querySelectorAll(':scope > .panel[data-page=""]').forEach(panel=>{panel.style.display='none';});
+ }
+ const stats=document.getElementById('stats');
+ if(stats)stats.style.display=allowed==='overview'?'grid':'none';
+ document.querySelectorAll('.nav-btn').forEach(button=>button.classList.toggle('active',button.dataset.page===allowed));
+ try{
+  if(allowed==='analytics'){loadRangeAnalytics();loadRiskBaseline();}
+  if(allowed==='operations')loadControlCenter();
+  if(allowed==='security'){loadIncidents();loadDomains();}
+  if(allowed==='devices')refresh();
+  if(allowed==='profiles')loadConfigChanges();
+  if(allowed==='notifications')refresh();
+  if(allowed==='data')loadAlertLogSettings();
+ }catch(error){showDashboardError(dashboardErrorMessage(error));}
  if(window.innerWidth<=900)toggleSidebar(false);
- scrollToPendingTarget(page);
+ scrollToPendingTarget(allowed);
+}
+function toggleSidebar(force){
+ const sidebar=document.getElementById('sidebar');
+ if(!sidebar)return;
+ const open=typeof force==='boolean'?force:!sidebar.classList.contains('open');
+ sidebar.classList.toggle('open',open);
 }
 document.addEventListener('click',event=>{
- const target=event.target.closest('[data-nav-page][data-nav-target]');
+ const target=event.target.closest?.('[data-nav-page]');
  if(!target)return;
  event.preventDefault();
- navigateToTarget(target.dataset.navPage,target.dataset.navTarget);
+ navigateToTarget(target.dataset.navPage,target.dataset.navTarget||'');
 });
-function toggleSidebar(force){
- const s=document.getElementById('sidebar');if(!s)return;
- const open=typeof force==='boolean'?force:!s.classList.contains('open');s.classList.toggle('open',open);
-}
 document.addEventListener('click',event=>{
  const sidebar=document.getElementById('sidebar');
  if(!sidebar?.classList.contains('open'))return;
- if(sidebar.contains(event.target)||event.target.closest('#sidebar-toggle'))return;
+ if(sidebar.contains(event.target)||event.target.closest?.('#sidebar-toggle'))return;
  toggleSidebar(false);
 });
-
+function dashboardBoot(){
+ const steps=[
+  ['page setup',()=>setupDashboardPages()],
+  ['initial page',()=>showPage(localStorage.getItem('sentinel_active_page')||'overview')],
+  ['device detection',()=>detectDevice()],
+  ['alert search binding',()=>bindDashboardListener('alert-search','input',filterAlerts)],
+  ['alert type binding',()=>bindDashboardListener('alert-type-filter','change',filterAlerts)],
+  ['alert log settings',()=>loadAlertLogSettings()],
+  ['config changes',()=>loadConfigChanges()],
+  ['control center',()=>loadControlCenter()],
+  ['initial refresh',()=>refresh()]
+ ];
+ for(const [name,fn] of steps){
+  try{fn();}
+  catch(error){console.error('Dashboard boot step failed:',name,error);showDashboardError(name+': '+dashboardErrorMessage(error));}
+ }
+ try{window.addEventListener('resize',detectDevice);}catch(error){console.error(error);}
+ if(window.__sentinelRefreshTimer)clearInterval(window.__sentinelRefreshTimer);
+ window.__sentinelRefreshTimer=setInterval(()=>{
+  Promise.resolve().then(()=>refresh()).catch(error=>showDashboardError('Refresh failed: '+dashboardErrorMessage(error)));
+  Promise.resolve().then(()=>loadConfigChanges()).catch(error=>console.error('Config refresh failed:',error));
+  Promise.resolve().then(()=>loadControlCenter()).catch(error=>console.error('Control Center refresh failed:',error));
+ },5000);
+}
+window.addEventListener('error',event=>{
+ const message=event?.error?.message||event?.message;
+ if(message)showDashboardError(message);
+});
+window.addEventListener('unhandledrejection',event=>{
+ const message=event?.reason?.message||String(event?.reason||'Unknown promise rejection');
+ showDashboardError(message);
+});
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dashboardBoot,{once:true});
+else dashboardBoot();
 async function loadRiskBaseline(){try{const [risk,base]=await Promise.all([api('/api/risk-history?days=30'),api('/api/baseline')]);const riskText=risk.slice(-10).map(x=>x.day+': avg '+Number(x.avg_risk||0).toFixed(1)+' · max '+x.max_risk+' · '+x.alerts+' alerts').join(' | ');const baseText=base.slice(0,12).map(x=>x.bucket_hour+':00 '+Number(x.baseline||0).toFixed(1)+' avg').join(' · ');setText('control-details','Risk history: '+(riskText||'No data')+' || Baseline: '+(baseText||'No data'),'muted')}catch(e){setText('control-details',e.message,'error')}}
 async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');await refresh();await loadControlCenter();}catch(e){setText('control-details',e.message,'error')}}
 async function showConfigDiff(){try{const accounts=await api('/api/accounts');if(!accounts.length){setText('control-details','No profiles configured.','muted');return}const d=await api('/api/config-diff/'+encodeURIComponent(accounts[0].profile_id));setText('control-details',d.changed?d.diff.map(x=>x.field+': '+JSON.stringify(x.before)+' → '+JSON.stringify(x.after)).join(' | '):'No recent configuration diff for '+accounts[0].profile_id,'muted')}catch(e){setText('control-details',e.message,'error')}}

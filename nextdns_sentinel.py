@@ -759,26 +759,17 @@ class Sentinel:
         event_time: str = "",
     ) -> bool:
         message = (
-            "NextDNS Sentinel alert
-
-"
-            f"Account: {account['name']}
-"
-            f"Domain: {domain}
-"
-            f"Matched: {matched or 'n/a'}
-"
-            f"Status: {status or 'n/a'}
-"
-            f"Reason: {reason or 'Custom denylist match'}
-"
-            f"Event Time: {event_time or 'n/a'}
-"
+            "NextDNS Sentinel alert\n\n"
+            f"Account: {account['name']}\n"
+            f"Domain: {domain}\n"
+            f"Matched: {matched or 'n/a'}\n"
+            f"Status: {status or 'n/a'}\n"
+            f"Reason: {reason or 'Custom denylist match'}\n"
+            f"Event Time: {event_time or 'n/a'}\n"
             f"Detected At: {utc_now()}"
         )
         if client_ip:
-            message += f"
-Client IP: {client_ip}"
+            message += f"\nClient IP: {client_ip}"
         if not self.telegram_token or not self.telegram_chat_id:
             return False
         return send_telegram(self.telegram_token, self.telegram_chat_id, message)

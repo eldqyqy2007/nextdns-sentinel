@@ -3305,6 +3305,31 @@ async function deleteAccount(id){
  catch(e){setText('account-message','Delete failed: '+e.message,'error');}
 }
 async function toggleAccount(id,active){try{await api('/api/accounts/'+encodeURIComponent(id)+'/toggle',{method:'POST',body:JSON.stringify({active})});await refresh();setText('account-message',active?'Profile enabled successfully.':'Profile disabled successfully.','ok');}catch(e){setText('account-message','Action failed: '+e.message,'error');}}
+async function renderGroupedDenylist(accounts){
+ const box=document.getElementById('denylist');if(!box)return;
+ box.replaceChildren();
+ if(!accounts?.length){box.textContent='No monitored profiles configured.';return;}
+ for(const account of accounts){
+  const details=document.createElement('details');details.className='account';
+  const summary=document.createElement('summary');summary.style.cursor='pointer';summary.textContent=(account.name||account.profile_id)+' · '+(account.profile_name||account.profile_id);
+  const body=document.createElement('div');body.className='mini-list';body.textContent='Expand to load live denylist…';
+  details.append(summary,body);
+  details.addEventListener('toggle',async()=>{
+   if(!details.open||details.dataset.loaded)return;
+   details.dataset.loaded='1';
+   try{
+    const list=await api('/api/denylist/'+encodeURIComponent(account.profile_id));body.replaceChildren();
+    const head=document.createElement('div');head.className='muted';head.textContent=list.length+' live entries';body.append(head);
+    for(const domain of list.slice(0,1000)){
+     const row=document.createElement('div');row.className='mini-item';const name=document.createElement('span');name.textContent=domain;
+     const b=document.createElement('button');b.className='stop';b.textContent='Remove';b.onclick=async()=>{document.getElementById('deny-profile').value=account.profile_id;await profileDeny('remove',domain);details.dataset.loaded='';details.open=true;};
+     row.append(name,b);body.append(row);
+    }
+   }catch(e){body.textContent=e.message;}
+  });
+  box.append(details);
+ }
+}
 async function showDenylist(id){
  document.getElementById('deny-profile').value=id;
  await showSelectedDenylist();
@@ -3489,6 +3514,7 @@ async function refresh(){
   const timelineData=await api('/api/timeline');renderTimeline(timelineData);
   const devices=await api('/api/devices');renderDevices(devices);
   const accounts=await api('/api/accounts');const box=document.getElementById('accounts');box.replaceChildren();
+  renderGroupedDenylist(accounts);
   if(!accounts.length){box.textContent='No profiles configured. Add one above.';}
   else{
    const wrap=document.createElement('div');wrap.className='table-wrap';

@@ -139,7 +139,9 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
   - Ignored
 - Investigation timelines.
 - New/Seen alert state.
+- Alert origin tracking for dashboard, NextDNS/profile changes, device activity, and system events.
 - Telegram delivery history.
+- Multiple Telegram bot support with per-bot controls.
 - Notification retry handling.
 - Alert suppression and cooldowns.
 - Maintenance mode for controlled operational windows.
@@ -155,6 +157,7 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
 - Baseline tracking by profile and hour.
 - Anomaly detection against observed activity.
 - Incident metrics and mean-time-to-resolve tracking.
+- Per-profile analytics and historical activity breakdowns.
 - Search across Sentinel's stored security data.
 - Security-focused event metadata for investigation.
 
@@ -162,17 +165,18 @@ Everything above the SQLite boundary is designed to run locally with the NextDNS
 
 The dashboard provides a single local control surface for:
 
-- Profile management.
+- Profile management and profile-specific editing.
 - Monitoring start/stop.
-- Telegram configuration and testing.
-- Recent alerts.
-- Alert severity and risk.
+- Telegram multi-bot configuration and testing.
+- Recent alerts and live operational notifications.
+- Alert severity, risk, and origin.
 - Profile health.
-- Device activity.
+- Device activity and device details/editing.
 - Security incidents.
 - Investigation details.
 - Domain intelligence.
 - Search Everything.
+- Per-profile analytics.
 - Audit and delivery history.
 - Bulk operation history.
 - Control Center.
@@ -183,9 +187,10 @@ The dashboard provides a single local control surface for:
 - Incident metrics.
 - Rate-limit telemetry.
 - Database retention.
-- Configuration diff.
+- Configuration preview and diff.
 - Settings export/import.
 - Database backup/restore.
+- API authentication controls.
 
 The dashboard refreshes operational data automatically and also provides explicit refresh controls.
 
@@ -199,7 +204,7 @@ Sentinel can work with NextDNS profile configuration through API-backed controls
 - Parental-control configuration.
 - Profile settings.
 
-Configuration changes are recorded with before/after state where supported, and Sentinel can safely undo a recorded change only when the live configuration still matches the expected post-change state.
+Configuration changes can be previewed, recorded with before/after state where supported, and safely undone only when the live configuration still matches the expected post-change state.
 
 ### <img src="./assets/icons/security.svg" alt="" width="20" height="20" align="absmiddle"> Security & Reliability
 
@@ -207,7 +212,7 @@ Configuration changes are recorded with before/after state where supported, and 
 - Automatic local secret generation.
 - Environment-variable secret override.
 - Localhost-first dashboard binding.
-- Optional API authentication.
+- Session/API authentication controls.
 - Safe Mode to block protected configuration mutations.
 - SQLite integrity validation before restore.
 - Pre-restore database rollback copy.
@@ -362,19 +367,23 @@ NEXTDNS_SENTINEL_SECRET_FILE
 | `NEXTDNS_SENTINEL_SECRET_FILE` | `data/.sentinel_secret` | Secret-file location |
 | `NEXTDNS_SENTINEL_DB` | `data/sentinel.db` | SQLite database path |
 | `NEXTDNS_SENTINEL_CONFIG` | `config.json` | Configuration path |
-| `NEXTDNS_SENTINEL_INTERVAL` | `15` | Poll interval in seconds |
+| `NEXTDNS_SENTINEL_INTERVAL` | `5` | Poll interval in seconds |
 | `NEXTDNS_SENTINEL_INITIAL_LOOKBACK` | `60` | Initial log lookback |
-| `NEXTDNS_SENTINEL_POLL_OVERLAP_MS` | `5000` | Poll overlap |
-| `NEXTDNS_SENTINEL_ALERT_COOLDOWN` | `300` | Alert cooldown |
+| `NEXTDNS_SENTINEL_POLL_OVERLAP_MS` | `180000` | Poll overlap in milliseconds |
+| `NEXTDNS_SENTINEL_ALERT_COOLDOWN` | `10` | Alert cooldown in seconds |
 | `NEXTDNS_SENTINEL_API_RETRIES` | `3` | API retry attempts |
 | `NEXTDNS_SENTINEL_NOTIFICATION_RETRY_BASE` | `30` | Initial notification retry delay |
 | `NEXTDNS_SENTINEL_NOTIFICATION_RETRY_MAX` | `900` | Maximum notification retry delay |
 | `NEXTDNS_SENTINEL_MAX_NOTIFICATION_ATTEMPTS` | `10` | Maximum notification attempts |
 | `NEXTDNS_SENTINEL_ALERT_RETENTION_DAYS` | `90` | Alert retention period |
+| `NEXTDNS_SENTINEL_CONFIG_CHECK_EVERY` | `3` | Configuration-change check interval |
+| `NEXTDNS_SENTINEL_NOTIFICATION_MAX_AGE` | `3600` | Maximum notification age in seconds |
+| `NEXTDNS_SENTINEL_DEVICE_INACTIVITY_SECONDS` | `3600` | Device inactivity threshold |
 | `NEXTDNS_SENTINEL_HTTP_TIMEOUT` | `10` | HTTP timeout |
 | `NEXTDNS_SENTINEL_HOST` | `127.0.0.1` | Dashboard bind address |
 | `NEXTDNS_SENTINEL_PORT` | `5000` | Dashboard port |
 | `NEXTDNS_SENTINEL_LOG_LEVEL` | `INFO` | Logging level |
+| `NEXTDNS_SENTINEL_ALERT_LOG` | `sentinel.log` | Alert/event log file |
 
 ---
 
@@ -390,6 +399,8 @@ The Sentinel dashboard is organized around operational visibility rather than a 
 - Device Activity
 - Event Timeline
 - Recent Alerts
+- Per-profile analytics
+- Busiest hours and historical activity views
 
 ### Security Operations
 
@@ -401,6 +412,7 @@ The Sentinel dashboard is organized around operational visibility rather than a 
 - Audit Center
 - Telegram Delivery Center
 - Bulk Operations History
+- Alert origin tracking
 
 ### Control Center
 
@@ -414,10 +426,18 @@ The Control Center groups operational actions in one place:
 - Incident Metrics
 - Rate-Limit History
 - Database Retention
-- Configuration Diff
+- Configuration Diff / Preview
 - Risk / Baseline views
 - Settings Export / Import
 - API Authentication controls
+
+### Devices & Profiles
+
+The dashboard provides profile-scoped and device-focused operational controls, including profile editing, device details, activity counters, and alert context where available.
+
+### Telegram
+
+Telegram delivery supports multiple configured bots with independent controls for enabling, testing, editing, deleting, and selecting alert categories. Delivery history and retry state are retained locally.
 
 This keeps advanced controls available without requiring manual database edits or separate configuration files.
 
@@ -428,6 +448,10 @@ This keeps advanced controls available without requiring manual database edits o
 ### Severity & Risk
 
 Alerts are enriched with security metadata so operators can distinguish ordinary events from higher-risk activity.
+
+### Alert origins
+
+Sentinel records the source context of security events where available, allowing operators to distinguish dashboard actions, NextDNS/profile configuration changes, device-related events, and internal/system events.
 
 ### Correlation
 
@@ -452,6 +476,10 @@ Rules can match event context such as profile, domain, device, and alert type an
 
 Sentinel maintains historical activity baselines and compares observed activity against those patterns to provide anomaly context.
 
+### Analytics
+
+Historical analytics can be viewed globally and by profile, including alert activity, blocked domains, device activity, event origins, time-based patterns, and risk context.
+
 ---
 
 ## <img src="./assets/icons/project.svg" alt="" width="24" height="24" align="absmiddle"> Device & Domain Intelligence
@@ -467,6 +495,7 @@ DNS events can update device state with information available from NextDNS, incl
 - Last activity
 - Last observed domain
 - Activity status
+- Alert/blocked activity counters where available
 
 Sentinel can also generate an inactivity alert when a monitored device stops producing recent DNS activity.
 
@@ -481,6 +510,7 @@ Domain-related alert context can include:
 - Correlation context.
 - Historical activity.
 - Anomaly information.
+- Profile-specific activity where available.
 
 ---
 
@@ -498,9 +528,9 @@ Changes can include:
 - Timestamp.
 - Undo state.
 
-### Configuration Diff
+### Configuration Preview & Diff
 
-The dashboard can display field-level differences between recorded configuration states.
+The dashboard can preview proposed changes and display field-level differences between recorded configuration states before applying supported changes.
 
 ### Safe Undo
 
@@ -526,6 +556,7 @@ Sentinel maintains a local heartbeat and exposes health information covering ope
 - Alert storage.
 - Monitor heartbeat.
 - Operational state.
+- Recent monitor/API errors.
 
 ### Rate-limit intelligence
 
@@ -563,9 +594,10 @@ Secrets such as API keys and tokens are intentionally excluded from the settings
 - The local secret file and database should never be committed to Git.
 - SQLite itself is **not** fully encrypted; Fernet protects supported credential fields.
 - The dashboard binds to localhost by default.
-- Sentinel supports optional API authentication for protected API access.
+- Sentinel supports optional API/session authentication for protected access.
 - Safe Mode can block protected configuration mutations.
 - Destructive operations in the dashboard use confirmation prompts where appropriate.
+- Configuration undo verifies the current live state before applying a reversal.
 - Database restore performs integrity validation and creates a rollback copy.
 - Do not expose Sentinel directly to the public internet without adding appropriate network-level protections.
 
@@ -585,7 +617,7 @@ SQLite contains Sentinel's local operational state, including areas such as:
 
 - Profiles and encrypted credentials.
 - Alert history.
-- Alert metadata.
+- Alert metadata and origins.
 - Incidents and incident relationships.
 - Device state.
 - Domain intelligence.
@@ -644,9 +676,8 @@ The application logic is intentionally consolidated into the main Python file.
 ```text
 nextdns-sentinel/
 ├── assets/
-│   ├── banner/
+│   ├── a_wide_cinematic_cyber_tech_themed_banner_hero_i.png
 │   └── icons/
-├── config.example.json
 ├── nextdns_sentinel.py
 ├── requirements.txt
 ├── .gitignore

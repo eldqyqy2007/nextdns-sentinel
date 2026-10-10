@@ -447,7 +447,7 @@ class FeatureStore:
         enriched = self.enrich_alert(alert_id, context.get('profile_id',''), context.get('alert_type',''),
                                       context.get('status',''), context.get('domain',''),
                                       context.get('device_id',''), context.get('event_timestamp',''))
-        if enriched:
+        if enriched and context.get('alert_type') != 'device_recovered':
             incident = self.create_or_update_incident(alert_id, {**context, **enriched})
             if incident:
                 enriched['incident_id'] = incident['id']
@@ -543,6 +543,8 @@ class FeatureStore:
             return rows
 
     def delivery(self, alert_id: int, channel: str, status: str, attempt: int = 1, error: str = '') -> None:
+        if channel == "telegram" and status == "sent" and _LAST_SEND.get("outcome") == "filtered":
+            status = "filtered"  # the per-profile rules held this report back; nothing reached Telegram
         with self._connect() as db:
             db.execute(
                 "INSERT INTO delivery_events(alert_id,channel,status,attempt,error,created_at) VALUES(?,?,?,?,?,?)",
@@ -852,6 +854,46 @@ class FeatureStore:
             cur=db.execute("INSERT INTO maintenance_windows(scope,profile_id,reason,starts_at,ends_at,created_at) VALUES(?,?,?,?,?,?)",(scope,profile_id,reason,start,end,now_iso()))
         return int(cur.lastrowid)
 
+    RESET_ALERT_TABLES = ("incident_alerts", "escalation_events", "delivery_events", "notification_state", "alert_metadata",
+                          "incidents", "alerts", "config_changes", "device_state", "anomaly_baseline", "domain_intelligence",
+                          "retention_runs", "rate_limit_events")
+    RESET_ID_TABLES = ("alerts", "incidents", "delivery_events", "escalation_events", "config_changes", "retention_runs",
+                       "rate_limit_events")
+
+    def reset_alert_data(self) -> dict[str, int]:
+        """Erase alert history and every counter derived from it. Bots, profiles, rules and settings are kept."""
+        deleted: dict[str, int] = {}
+        now_ms = int(time.time() * 1000)
+        with self._connect() as db:
+            for table in self.RESET_ALERT_TABLES:
+                deleted[table] = int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                db.execute(f"DELETE FROM {table}")
+            # counters / last-error markers that live on configuration rows (the rows themselves stay)
+            db.execute("UPDATE telegram_bots SET last_notification_at='', last_error=''")
+            db.execute("UPDATE monitor_state SET last_error='', last_error_at='', consecutive_failures=0")
+            db.execute("DELETE FROM settings WHERE key LIKE 'dash_mark:%'")
+            db.execute("UPDATE settings SET value='' WHERE key='telegram_last_error'")
+            # Logs are re-read with an overlap; never look back past this moment, or events that happened before the
+            # reset would come back as brand-new alerts (and be sent to Telegram again).
+            db.execute(
+                "INSERT INTO settings(key,value) VALUES('alerts_reset_floor_ms',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(now_ms),),
+            )
+        # restart the numbering ("alert #1") where the database allows it; a separate transaction per table so that a
+        # missing privilege can never undo the reset above
+        for table in self.RESET_ID_TABLES:
+            try:
+                with self._connect() as db:
+                    if getattr(sqlite3, "sqlite_version", "") == "postgres":
+                        # next id = highest remaining id + 1 (1 when empty): safe even if a row was inserted meanwhile
+                        db.execute(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)")
+                    else:
+                        db.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+            except Exception:
+                logging.debug("Could not restart the id numbering of %s", table, exc_info=True)
+        return deleted
+
     def end_maintenance(self):
         with self._connect() as db:
             cur=db.execute("UPDATE maintenance_windows SET ends_at=? WHERE ends_at>?",(now_iso(),now_iso()))
@@ -904,6 +946,160 @@ class FeatureStore:
 
 
 APP_NAME = "NextDNS Sentinel"
+# ---- dashboard visibility rules (filtered views for the dashboard only) ----
+DASHBOARD_KIND_KEYS = (
+    "denylist_match", "denylist_added", "denylist_removed", "config_changed", "configuration_undo",
+    "device_inactive", "device_recovered", "device_new", "security_event",
+)
+_DASH = threading.local()
+_DASH_REF = re.compile(
+    r"\b(FROM|JOIN)(\s+)(alerts|alert_metadata|incident_alerts|incidents|delivery_events|escalation_events|domain_intelligence|anomaly_baseline|device_state|config_changes)\b",
+    re.IGNORECASE,
+)
+_DASH_SAFE = re.compile(r"^[A-Za-z0-9_.:@\-]+$")
+_DASH_DEPS = {
+    "alert_metadata": ("alerts",), "incident_alerts": ("alerts",), "incidents": ("incident_alerts", "alerts"),
+    "delivery_events": ("alerts",), "escalation_events": ("alerts",), "domain_intelligence": ("alerts",),
+}
+_DASH_ORDER = ("alerts", "alert_metadata", "incident_alerts", "incidents", "delivery_events", "escalation_events", "domain_intelligence", "anomaly_baseline", "device_state", "config_changes")
+
+
+def _dash_lit(values) -> str:
+    return ",".join("'" + str(v).replace("'", "''") + "'" for v in values)
+
+
+def dashboard_kind_sql(alias: str) -> str:
+    """SQL twin of the kind a Telegram report gets for an alert row (see Sentinel.notify)."""
+    keys = _dash_lit(DASHBOARD_KIND_KEYS)
+    a = alias
+    return (
+        f"CASE WHEN LOWER(COALESCE({a}.alert_type,''))='denylist_match' THEN 'denylist_match' "
+        f"WHEN LOWER(COALESCE({a}.status,'')) IN ({keys}) THEN LOWER({a}.status) "
+        f"WHEN LOWER(COALESCE({a}.alert_type,'')) IN ({keys}) THEN LOWER({a}.alert_type) "
+        f"WHEN COALESCE({a}.domain,'')<>'' AND COALESCE({a}.alert_type,'')='' THEN 'denylist_match' "
+        f"ELSE 'security_event' END"
+    )
+
+
+def _dash_hidden_clause(col: str, rules, kind_expr: str | None = None, kind_const: str | None = None) -> str:
+    parts = []
+    off = [pid for pid, r in rules.items() if not r["enabled"] and _DASH_SAFE.match(pid)]
+    if off:
+        parts.append(f"{col} NOT IN ({_dash_lit(off)})")
+    for pid, r in rules.items():
+        if r["enabled"] and r["kinds"] and _DASH_SAFE.match(pid):
+            allowed = [k for k in DASHBOARD_KIND_KEYS if k in r["kinds"]]
+            if kind_expr is not None:
+                inner = f"{kind_expr} NOT IN ({_dash_lit(allowed)})" if allowed else "1=1"
+            else:
+                inner = "1=1" if kind_const not in allowed else "1=0"
+            parts.append(f"NOT ({col}='{pid}' AND {inner})")
+    return " AND ".join(parts) if parts else "1=1"
+
+
+def dashboard_ctes(rules, tables) -> str:
+    need = set(tables)
+    for t in list(need):
+        need.update(_DASH_DEPS.get(t, ()))
+    out = []
+    for t in _DASH_ORDER:
+        if t not in need:
+            continue
+        if t == "alerts":
+            body = f"SELECT * FROM alerts a0 WHERE {_dash_hidden_clause('a0.profile_id', rules, dashboard_kind_sql('a0'))}"
+        elif t == "alert_metadata":
+            body = "SELECT * FROM alert_metadata WHERE alert_id IN (SELECT id FROM dash_alerts)"
+        elif t == "incident_alerts":
+            body = "SELECT * FROM incident_alerts WHERE alert_id IN (SELECT id FROM dash_alerts)"
+        elif t == "incidents":
+            has = "EXISTS (SELECT 1 FROM incident_alerts x WHERE x.incident_id=i0.id)"
+            vis = "(SELECT COUNT(*) FROM incident_alerts x WHERE x.incident_id=i0.id AND x.alert_id IN (SELECT id FROM dash_alerts))"
+            body = (
+                "SELECT i0.id,i0.incident_key,i0.profile_id,i0.title,i0.severity,i0.risk_score,i0.status,i0.summary,"
+                "i0.first_seen_at,i0.last_seen_at,"
+                f"CASE WHEN {has} THEN {vis} ELSE i0.alert_count END AS alert_count,"
+                "i0.device_id,i0.domain,i0.created_at,i0.updated_at,i0.resolved_at FROM incidents i0 "
+                f"WHERE {_dash_hidden_clause('i0.profile_id', {k: dict(v, kinds=set()) for k, v in rules.items()})} "
+                f"AND (NOT {has} OR {vis}>0)"
+            )
+        elif t == "delivery_events":
+            body = "SELECT * FROM delivery_events WHERE alert_id IS NULL OR alert_id IN (SELECT id FROM dash_alerts)"
+        elif t == "escalation_events":
+            body = "SELECT * FROM escalation_events WHERE alert_id IS NULL OR alert_id IN (SELECT id FROM dash_alerts)"
+        elif t == "domain_intelligence":
+            body = "SELECT * FROM domain_intelligence WHERE domain IN (SELECT domain FROM dash_alerts)"
+        elif t == "anomaly_baseline":
+            body = f"SELECT * FROM anomaly_baseline b0 WHERE {_dash_hidden_clause('b0.profile_id', {k: dict(v, kinds=set()) for k, v in rules.items()})}"
+        elif t == "device_state":
+            dev_keys = {"device_inactive", "device_recovered", "device_new"}
+            dev_rules = {
+                k: {"enabled": bool(v["enabled"]) and (not v["kinds"] or bool(v["kinds"] & dev_keys)), "kinds": set()}
+                for k, v in rules.items()
+            }
+            body = f"SELECT * FROM device_state d0 WHERE {_dash_hidden_clause('d0.profile_id', dev_rules)}"
+        else:  # config_changes
+            body = f"SELECT * FROM config_changes c0 WHERE {_dash_hidden_clause('c0.profile_id', rules, kind_const='config_changed')}"
+        out.append(f"dash_{t} AS ({body})")
+    return ", ".join(out)
+
+
+def dashboard_rewrite_sql(sql):
+    rules = getattr(_DASH, "rules", None)
+    if not rules or not isinstance(sql, str):
+        return sql
+    head = sql.lstrip()[:7].upper()
+    if not (head.startswith("SELECT") or head.startswith("WITH")):
+        return sql
+    used = {m.group(3).lower() for m in _DASH_REF.finditer(sql)}
+    if not used:
+        return sql
+    new_sql = _DASH_REF.sub(lambda m: f"{m.group(1)}{m.group(2)}dash_{m.group(3).lower()}", sql)
+    ctes = dashboard_ctes(rules, used)
+    m = re.match(r"\s*WITH\s+(RECURSIVE\s+)?", new_sql, re.IGNORECASE)
+    if m:
+        return "WITH " + (m.group(1) or "") + ctes + ", " + new_sql[m.end():]
+    return "WITH " + ctes + " " + new_sql
+
+
+class _DashConnection:
+    """Connection proxy: reads of alert-derived tables are filtered while a dashboard request is active."""
+
+    def __init__(self, conn):
+        object.__setattr__(self, "_c", conn)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._c, name, value)
+
+    def __enter__(self):
+        self._c.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._c.__exit__(*exc)
+
+    def execute(self, sql, *args, **kwargs):
+        return self._c.execute(dashboard_rewrite_sql(sql), *args, **kwargs)
+
+
+class _DashSqlite:
+    """Drop-in for the sqlite3 module name. Untouched unless a dashboard request has active rules."""
+
+    def __init__(self, module):
+        object.__setattr__(self, "_m", module)
+
+    def __getattr__(self, name):
+        return getattr(self._m, name)
+
+    def connect(self, *args, **kwargs):
+        conn = self._m.connect(*args, **kwargs)
+        return _DashConnection(conn) if getattr(_DASH, "rules", None) else conn
+
+
+sqlite3 = _DashSqlite(sqlite3)
+
 DB_PATH = Path(os.getenv("NEXTDNS_SENTINEL_DB", "data/sentinel.db"))
 CONFIG_PATH = Path(os.getenv("NEXTDNS_SENTINEL_CONFIG", "config.json"))
 LOG_LEVEL = os.getenv("NEXTDNS_SENTINEL_LOG_LEVEL", "INFO").upper()
@@ -1005,6 +1201,36 @@ def origin_of(source: str) -> tuple[str, str]:
     return "system", "Sentinel system"
 
 
+# Every kind of report a bot can receive for one profile: (key, label, category).
+REPORT_KIND_CATALOG = [
+    ("denylist_match", "🚫 Blocked site visited", "site"),
+    ("denylist_added", "➕ Site added to denylist", "denylist"),
+    ("denylist_removed", "➖ Site removed from denylist", "denylist"),
+    ("config_changed", "🔧 NextDNS profile settings changed", "profile"),
+    ("configuration_undo", "↩️ Settings change undone", "profile"),
+    ("device_inactive", "📴 Device went silent", "device"),
+    ("device_recovered", "✅ Device back online", "device"),
+    ("device_new", "📱 New device seen", "device"),
+    ("security_event", "🛡️ Other security event", "system"),
+    ("alert_escalation", "📈 Alert escalation", "system"),
+    ("incident_status", "🗂️ Incident status updated", "system"),
+    ("profile_settings", "✏️ Profile edited in Sentinel", "system"),
+    ("profile_monitoring", "👁️ Profile monitoring turned on/off", "system"),
+    ("profile_removed", "🗑️ Profile removed from Sentinel", "system"),
+    ("maintenance_mode", "🛠️ Maintenance mode started or ended", "system"),
+]
+# notify_report() titles -> report kind
+SYSTEM_REPORT_KINDS = {
+    "Alert escalation": "alert_escalation",
+    "Incident status updated": "incident_status",
+    "Profile settings updated": "profile_settings",
+    "Profile monitoring changed": "profile_monitoring",
+    "Profile removed from Sentinel": "profile_removed",
+    "Maintenance mode enabled": "maintenance_mode",
+    "Maintenance mode ended": "maintenance_mode",
+}
+
+
 def alert_category(alert_type: str, status: str = "") -> str:
     alert_type = str(alert_type or ""); status = str(status or "")
     if alert_type == "denylist_match":
@@ -1016,6 +1242,10 @@ def alert_category(alert_type: str, status: str = "") -> str:
     if "device" in alert_type or status.startswith("device"):
         return "device"
     return "other"
+
+
+# Outcome of the most recent Telegram send: "sent", "filtered" (held back by the rules) or "failed".
+_LAST_SEND = {"outcome": ""}
 
 
 def utc_now() -> str:
@@ -1141,6 +1371,24 @@ class Store:
             for _col in ("alert_types", "quiet_start", "quiet_end"):
                 if _col not in _bot_cols:
                     db.execute(f"ALTER TABLE telegram_bots ADD COLUMN {_col} TEXT NOT NULL DEFAULT ''")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS telegram_bot_profile_rules (
+                    bot_id INTEGER NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    alert_kinds TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (bot_id, profile_id)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS dashboard_profile_rules (
+                    profile_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    alert_kinds TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                )
+            """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(monitor_state)")}
             if "consecutive_failures" not in columns:
                 db.execute("ALTER TABLE monitor_state ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
@@ -1329,6 +1577,96 @@ class Store:
             cur = db.execute("UPDATE telegram_bots SET alert_types=?,quiet_start=?,quiet_end=?,updated_at=? WHERE id=?", (types, a, b, utc_now(), bot_id))
             return cur.rowcount > 0
 
+    def dashboard_rules(self, strict: bool = False) -> dict[str, dict[str, Any]]:
+        """{profile_id: {"enabled": bool, "kinds": set[str]}} for the dashboard. Missing rule = show everything."""
+        try:
+            with sqlite3.connect(self.path) as db:
+                rows = db.execute("SELECT profile_id,enabled,alert_kinds FROM dashboard_profile_rules").fetchall()
+        except Exception:
+            if strict:
+                raise
+            logging.warning("Dashboard rules unavailable; showing everything.", exc_info=True)
+            return {}
+        return {str(r[0]): {"enabled": bool(r[1]), "kinds": {x for x in str(r[2] or "").split(",") if x}} for r in rows}
+
+    def set_dashboard_rules(self, rules: list[dict[str, Any]]) -> None:
+        valid = set(DASHBOARD_KIND_KEYS)
+        now = utc_now()
+        with sqlite3.connect(self.path) as db:
+            known = {str(r[0]) for r in db.execute("SELECT profile_id FROM accounts").fetchall()}
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                pid = str(rule.get("profile_id") or "")
+                if pid not in known:
+                    continue
+                enabled = bool(rule.get("enabled", True))
+                kinds = sorted({k for k in (rule.get("kinds") or []) if k in valid})
+                if len(kinds) >= len(valid):
+                    kinds = []  # every kind selected == no restriction
+                if enabled and not kinds:
+                    db.execute("DELETE FROM dashboard_profile_rules WHERE profile_id=?", (pid,))
+                else:
+                    db.execute(
+                        "INSERT INTO dashboard_profile_rules(profile_id,enabled,alert_kinds,updated_at) "
+                        "VALUES(?,?,?,?) ON CONFLICT(profile_id) DO UPDATE SET "
+                        "enabled=excluded.enabled,alert_kinds=excluded.alert_kinds,updated_at=excluded.updated_at",
+                        (pid, int(enabled), ",".join(kinds), now),
+                    )
+
+    def telegram_bot_rules(self, strict: bool = False) -> dict[tuple[int, str], dict[str, Any]]:
+        """{(bot_id, profile_id): {"enabled": bool, "kinds": set[str]}}. Missing rule = send everything."""
+        try:
+            with sqlite3.connect(self.path) as db:
+                rows = db.execute("SELECT bot_id,profile_id,enabled,alert_kinds FROM telegram_bot_profile_rules").fetchall()
+        except Exception:
+            if strict:
+                raise
+            logging.warning("Per-profile bot rules unavailable.", exc_info=True)
+            return {}
+        return {(int(r[0]), str(r[1])): {"enabled": bool(r[2]), "kinds": {x for x in str(r[3] or "").split(",") if x}}
+                for r in rows}
+
+    def bot_profile_allows(self, bot_id: int, profile_id: str, kind: str,
+                           rules: dict[tuple[int, str], dict[str, Any]] | None = None) -> bool:
+        if not profile_id:
+            return True  # report does not belong to one profile
+        rules = self.telegram_bot_rules() if rules is None else rules
+        rule = rules.get((int(bot_id), str(profile_id)))
+        if not rule:
+            return True
+        if not rule["enabled"]:
+            return False
+        return not rule["kinds"] or not kind or kind in rule["kinds"]
+
+    def set_telegram_bot_profile_rules(self, bot_id: int, rules: list[dict[str, Any]]) -> bool:
+        valid = {k for k, _label, _cat in REPORT_KIND_CATALOG}
+        now = utc_now()
+        with sqlite3.connect(self.path) as db:
+            if not db.execute("SELECT 1 FROM telegram_bots WHERE id=?", (bot_id,)).fetchone():
+                return False
+            known = {str(r[0]) for r in db.execute("SELECT profile_id FROM accounts").fetchall()}
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                pid = str(rule.get("profile_id") or "")
+                if pid not in known:
+                    continue
+                enabled = bool(rule.get("enabled", True))
+                kinds = sorted({k for k in (rule.get("kinds") or []) if k in valid})
+                if len(kinds) >= len(valid):
+                    kinds = []  # every kind selected == no restriction (new kinds are then included automatically)
+                if enabled and not kinds:
+                    db.execute("DELETE FROM telegram_bot_profile_rules WHERE bot_id=? AND profile_id=?", (bot_id, pid))
+                else:
+                    db.execute(
+                        "INSERT INTO telegram_bot_profile_rules(bot_id,profile_id,enabled,alert_kinds,updated_at) "
+                        "VALUES(?,?,?,?,?) ON CONFLICT(bot_id,profile_id) DO UPDATE SET "
+                        "enabled=excluded.enabled,alert_kinds=excluded.alert_kinds,updated_at=excluded.updated_at",
+                        (bot_id, pid, int(enabled), ",".join(kinds), now),
+                    )
+        return True
+
     def set_telegram_bot_enabled(self, bot_id: int, enabled: bool) -> bool:
         with sqlite3.connect(self.path) as db:
             cur=db.execute("UPDATE telegram_bots SET enabled=?,updated_at=? WHERE id=?",(int(enabled),utc_now(),bot_id))
@@ -1336,6 +1674,7 @@ class Store:
 
     def delete_telegram_bot(self, bot_id: int) -> bool:
         with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM telegram_bot_profile_rules WHERE bot_id=?",(bot_id,))
             cur=db.execute("DELETE FROM telegram_bots WHERE id=?",(bot_id,))
             return cur.rowcount>0
 
@@ -1482,18 +1821,36 @@ class Store:
 
     def update_device_state(self, profile_id: str, device_id: str, device_name: str,
                             device_model: str, client_ip: str, last_seen_at: str,
-                            last_status: str, last_domain: str) -> None:
+                            last_status: str, last_domain: str) -> dict[str, Any] | None:
+        """Upsert the device row. Activity only moves forward and the "silent" flag is left alone (see check_device_inactivity)."""
         device_id=device_id or "__UNIDENTIFIED__"
+        newer="(excluded.last_seen_at<>'' AND (device_state.last_seen_at='' OR excluded.last_seen_at>=device_state.last_seen_at))"
         with sqlite3.connect(self.path) as db:
-            db.execute("""
+            db.execute(f"""
                 INSERT INTO device_state(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,updated_at,inactive_alerted_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(profile_id,device_id) DO UPDATE SET
-                  device_name=excluded.device_name,device_model=excluded.device_model,
-                  client_ip=excluded.client_ip,last_seen_at=CASE WHEN excluded.last_seen_at<>'' THEN excluded.last_seen_at ELSE device_state.last_seen_at END,
-                  last_status=excluded.last_status,last_domain=excluded.last_domain,updated_at=excluded.updated_at,
-                  inactive_alerted_at=CASE WHEN excluded.last_seen_at<>'' THEN '' ELSE device_state.inactive_alerted_at END
+                  device_name=CASE WHEN {newer} THEN excluded.device_name ELSE device_state.device_name END,
+                  device_model=CASE WHEN {newer} THEN excluded.device_model ELSE device_state.device_model END,
+                  client_ip=CASE WHEN {newer} THEN excluded.client_ip ELSE device_state.client_ip END,
+                  last_seen_at=CASE WHEN excluded.last_seen_at<>'' AND (device_state.last_seen_at='' OR excluded.last_seen_at>device_state.last_seen_at) THEN excluded.last_seen_at ELSE device_state.last_seen_at END,
+                  last_status=CASE WHEN {newer} THEN excluded.last_status ELSE device_state.last_status END,
+                  last_domain=CASE WHEN {newer} THEN excluded.last_domain ELSE device_state.last_domain END,
+                  updated_at=excluded.updated_at
             """,(profile_id,device_id,device_name,device_model,client_ip,last_seen_at,last_status,last_domain,utc_now(),""))
+        return None
+
+    def clear_device_inactive_flag(self, profile_id: str, device_id: str) -> bool:
+        """Atomically end the "silent" state. True only for the one caller that actually ended it."""
+        with sqlite3.connect(self.path) as db:
+            cur=db.execute("UPDATE device_state SET inactive_alerted_at='' WHERE profile_id=? AND device_id=? AND inactive_alerted_at<>''",(profile_id,device_id))
+            return cur.rowcount>0
+
+    def last_inactive_alert_seen(self, profile_id: str, device_id: str) -> str:
+        """last_seen_at the device had when its latest "went silent" report was raised ('' if unknown)."""
+        with sqlite3.connect(self.path) as db:
+            row=db.execute("SELECT event_timestamp FROM alerts WHERE profile_id=? AND alert_type='device_inactive' AND device_id=? ORDER BY id DESC LIMIT 1",(profile_id,device_id)).fetchone()
+        return str(row[0]) if row and row[0] else ""
 
     def mark_device_inactive_alerted(self, profile_id: str, device_id: str) -> bool:
         with sqlite3.connect(self.path) as db:
@@ -1673,10 +2030,10 @@ class Store:
             db.execute(
                 """
                 UPDATE alerts
-                SET notified_at=?, notification_status='sent'
+                SET notified_at=?, notification_status=?
                 WHERE event_key=?
                 """,
-                (utc_now(), event_key),
+                (utc_now(), "filtered" if _LAST_SEND.get("outcome") == "filtered" else "sent", event_key),
             )
             db.execute("""
                 UPDATE notification_state
@@ -2566,6 +2923,7 @@ class Sentinel:
         "configuration_undo": ("↩️ CHANGE UNDONE", "A previous settings change was reverted.", "profile"),
         "device_inactive": ("📴 DEVICE WENT SILENT", "A device stopped sending DNS queries to NextDNS.", "device"),
         "device_new": ("📱 NEW DEVICE SEEN", "A device appeared on this profile for the first time.", "device"),
+        "device_recovered": ("✅ DEVICE BACK ONLINE", "A device that had gone silent is sending DNS queries again.", "device"),
         "security_event": ("🛡️ SECURITY EVENT", "Sentinel recorded an event on this profile.", "system"),
     }
 
@@ -2646,15 +3004,15 @@ class Sentinel:
             since = f" (first at {e(fmt_dt12(repeat_since, False).split(' (')[0])})" if repeat_since else ""
             lines.append(f"🔁 <b>{repeats}</b> more attempt{'s' if repeats != 1 else ''} since the last alert{since}")
         lines.append("━━━━━━━━━━━━━━")
-        when = event_time if kind in ("denylist_match", "device_inactive") and event_time else utc_now()
+        when = event_time if kind in ("denylist_match", "device_inactive", "device_recovered") and event_time else utc_now()
         lines.append(f"🕒 <b>When:</b> {e(fmt_dt12(when if kind != 'device_inactive' else utc_now()))}")
         lines.append(f"{self.ORIGIN_ICON.get(origin_key, '⚙️')} <b>Origin:</b> {e(origin_label)}")
         return "\n".join(lines), category
 
     @staticmethod
     def _bot_wants(bot: dict[str, Any], category: str) -> bool:
-        wanted = [x for x in str(bot.get("alert_types") or "").split(",") if x]
-        return not wanted or not category or category in wanted
+        # Report types are now chosen per profile (telegram_bot_profile_rules); the old bot-wide filter is ignored.
+        return True
 
     @staticmethod
     def _bot_quiet_now(bot: dict[str, Any]) -> bool:
@@ -2690,14 +3048,31 @@ class Sentinel:
         message, category = self.build_report(account, domain, reason, status, matched, client_ip, event_time,
                                               device_id, device_name, device_model, protocol, encrypted,
                                               context, repeats, repeat_since)
-        return self._send_all(message, category)
+        alert_type_l = str(context.get("alert_type") or "").lower()
+        status_l = str(status or context.get("status") or "").lower()
+        kind = ("denylist_match" if alert_type_l == "denylist_match"
+                else (status_l if status_l in self.REPORT_KINDS
+                      else (alert_type_l if alert_type_l in self.REPORT_KINDS
+                            else ("denylist_match" if domain and not alert_type_l else "security_event"))))
+        return self._send_all(message, category, "HTML", str(account.get("profile_id") or ""), kind)
 
-    def _send_all(self, message: str, category: str = "", parse_mode: str = "HTML") -> bool:
+    def _send_all(self, message: str, category: str = "", parse_mode: str = "HTML",
+                  profile_id: str = "", kind: str = "") -> bool:
         """Send to every enabled bot that wants this kind of report, in parallel."""
         destinations = self.store.telegram_destinations()
         if destinations:
-            targets = [b for b in destinations if self._bot_wants(b, category)]
+            try:
+                rules = self.store.telegram_bot_rules(strict=True) if profile_id else {}
+            except Exception:
+                logging.exception("Could not read the per-profile bot rules; the report is held for retry, not sent unfiltered.")
+                _LAST_SEND["outcome"] = "failed"
+                return False
+            targets = [b for b in destinations
+                       if self._bot_wants(b, category) and self.store.bot_profile_allows(int(b["id"]), profile_id, kind, rules)]
+            if len(targets) < len(destinations):
+                logging.info("Report kind=%s profile=%s held back by the per-profile rules for %d bot(s).", kind, profile_id, len(destinations) - len(targets))
             if not targets:
+                _LAST_SEND["outcome"] = "filtered"
                 return True  # every bot opted out of this kind of report; nothing to deliver
             def one(bot: dict[str, Any]) -> bool:
                 ok, why = send_telegram_result(bot["token"], bot["chat_id"], message, retries=1,
@@ -2705,16 +3080,20 @@ class Sentinel:
                 self.store.mark_telegram_bot_result(int(bot["id"]), ok, "" if ok else why)
                 return ok
             with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
-                return any(list(pool.map(one, targets)))
+                delivered = any(list(pool.map(one, targets)))
+            _LAST_SEND["outcome"] = "sent" if delivered else "failed"
+            return delivered
+        _LAST_SEND["outcome"] = "failed"
         return False  # no enabled bot: nothing is sent anywhere
 
-    def notify_report(self, title: str, lines: list[str], alert_id: int | None = None, origin: str = "dashboard") -> bool:
+    def notify_report(self, title: str, lines: list[str], alert_id: int | None = None, origin: str = "dashboard",
+                      profile_id: str = "") -> bool:
         label = origin_of({"dashboard": "sentinel_dashboard", "app": "nextdns_profile", "device": "nextdns_logs"}.get(origin, ""))[1]
         body = "\n".join("▸ " + html_escape(str(x)) for x in lines)
         message = (f"<b>🛡️ {html_escape(title)}</b>\n\n{body}\n━━━━━━━━━━━━━━\n"
                    f"🕒 <b>When:</b> {html_escape(fmt_dt12(utc_now()))}\n"
                    f"{self.ORIGIN_ICON.get(origin, '⚙️')} <b>Origin:</b> {html_escape(label)}")
-        ok = self._send_all(message, "system")
+        ok = self._send_all(message, "system", "HTML", profile_id, SYSTEM_REPORT_KINDS.get(title, ""))
         if self.features and alert_id:
             self.features.delivery(alert_id, "telegram", "sent" if ok else "failed")
         return ok
@@ -2781,10 +3160,80 @@ class Sentinel:
                 logging.exception("Pending notification dispatcher failed")
             self.stop_event.wait(1)
 
+    def check_device_recovered(self, account: dict[str, Any], device: dict[str, Any]) -> None:
+        """A device reported silent is back if it has shown newer activity than when the silent report was raised,
+        or is simply active right now. Reported once: the flag is claimed atomically before anything is sent."""
+        profile_id = account["profile_id"]
+        device_id = device["device_id"]
+        last_seen = str(device.get("last_seen_at") or "")
+        if not last_seen:
+            return
+        last_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        since = self.store.last_inactive_alert_seen(profile_id, device_id)
+        since_dt = None
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                if since_dt.tzinfo is None:
+                    since_dt = since_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                since_dt = None
+        age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        if not ((since_dt is not None and last_dt > since_dt) or age < DEVICE_INACTIVITY_SECONDS):
+            return  # still silent
+        if not self.store.clear_device_inactive_flag(profile_id, device_id):
+            return  # another tick already reported it
+        silent_seconds = int((last_dt - since_dt).total_seconds()) if since_dt is not None else 0
+        self.raise_device_recovered(account, {
+            "device_id": device_id, "device_name": device.get("device_name", ""), "device_model": device.get("device_model", ""),
+            "client_ip": device.get("client_ip", ""), "last_seen_before": since, "seen_at": last_seen, "silent_seconds": silent_seconds,
+        })
+
+    def raise_device_recovered(self, account: dict[str, Any], info: dict[str, Any]) -> None:
+        profile_id = account["profile_id"]
+        secs = max(0, int(info.get("silent_seconds") or 0))
+        if secs >= 86400:
+            span = f"{secs // 86400} d {(secs % 86400) // 3600} h"
+        elif secs >= 3600:
+            span = f"{secs // 3600} h {(secs % 3600) // 60} min"
+        else:
+            span = f"{max(1, secs // 60)} min"
+        reason = f"DNS activity resumed after {span} of silence."
+        key = hashlib.sha256(("recovered:" + profile_id + ":" + str(info.get("device_id") or "") + ":" + str(info["seen_at"])).encode()).hexdigest()
+        ip = info.get("client_ip", "")
+        self.store.add_alert(profile_id, account["name"], "", "", reason, "device_recovered", ip, info["seen_at"], key,
+                             "device_recovered", info.get("device_id", ""), info.get("device_name", ""),
+                             info.get("device_model", ""), "")
+        alert_id = self.enrich_alert(key, account, "", reason, "device_recovered", "", ip, info["seen_at"],
+                                     info.get("device_id", ""), info.get("device_name", ""),
+                                     info.get("device_model", ""), "", False)
+        delivered = self.notify(account, "", reason, "device_recovered", "", ip, info["seen_at"],
+                                info.get("device_id", ""), info.get("device_name", ""),
+                                info.get("device_model", ""), "", False, alert_id)
+        if delivered:
+            self.store.mark_alert_notified(key)
+        else:
+            self.store.mark_notification_failed(key)
+
     def check_device_inactivity(self, account: dict[str, Any]) -> None:
         profile_id = account["profile_id"]
         for device in self.store.device_states():
-            if device["profile_id"] != profile_id or not device["last_seen_at"] or device.get("inactive_alerted_at"):
+            if device["profile_id"] != profile_id:
+                continue
+            if device.get("inactive_alerted_at"):
+                try:
+                    self.check_device_recovered(account, device)
+                except Exception as exc:
+                    logging.exception("Device recovery check failed for %s", account.get("name"))
+                    try:
+                        if self.features:
+                            self.features.audit("device_recovered_error", "device", str(device.get("device_id", "")), details={"error": str(exc)[:300]})
+                    except Exception:
+                        pass
+                continue
+            if not device["last_seen_at"]:
                 continue
             try:
                 last_dt = datetime.fromisoformat(str(device["last_seen_at"]).replace("Z","+00:00"))
@@ -2895,6 +3344,12 @@ class Sentinel:
                     if last_poll_ms
                     else now_ms - INITIAL_LOOKBACK * 1000
                 )
+                try:
+                    reset_floor = int(self.store.setting("alerts_reset_floor_ms", "0") or 0)
+                except ValueError:
+                    reset_floor = 0
+                if reset_floor and from_ms < reset_floor:
+                    from_ms = reset_floor
 
                 logs, checkpoint_ms = client.logs(profile_id, from_ms)
                 try:
@@ -2913,10 +3368,15 @@ class Sentinel:
                     # Device state is updated from every DNS log, not only denylist matches.
                     if domain:
                         try:
-                            self.store.update_device_state(
+                            recovered = self.store.update_device_state(
                                 profile_id, device_id, device_name, device_model,
                                 client_ip, event_time, status, domain,
                             )
+                            if recovered:
+                                try:
+                                    self.raise_device_recovered(account, recovered)
+                                except Exception:
+                                    logging.exception("Device-recovered alert failed for %s", account["name"])
                         except sqlite3.Error as exc:
                             # Device telemetry must never prevent denylist detection/alerting.
                             logging.warning(
@@ -2969,7 +3429,7 @@ class Sentinel:
                                 if self.features and alert_id: self.features.delivery(alert_id,"telegram","failed")
                             if policy.get("escalate") and delivered:
                                 self.features.audit("notification_escalation","alert",str(alert_id or ""),profile_id,{"level":2})
-                                self.notify_report("Alert escalation",["Profile: "+account["name"],"Domain: "+domain,"Rule requested escalation."],alert_id)
+                                self.notify_report("Alert escalation",["Profile: "+account["name"],"Domain: "+domain,"Rule requested escalation."],alert_id,profile_id=str(account.get("profile_id") or ""))
                         else:
                             self.store.mark_alert_suppressed(key)
                             if self.features and alert_id: self.features.delivery(alert_id,"telegram","suppressed")
@@ -3318,7 +3778,7 @@ details.tl-group>summary,details.inc-card>summary{display:flex;gap:8px;align-ite
 .bot-head{display:flex;align-items:center;gap:12px}.bot-avatar{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff}
 .bot-title{flex:1;min-width:0}.bot-info{margin:10px 0;display:grid;gap:3px}.kv.err span{color:var(--bad)}
 .bot-actions{display:flex;flex-wrap:wrap;gap:8px}.bot-prefs{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}.bot-prefs>summary{cursor:pointer;color:var(--acc);font-weight:700}
-.pref-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px;margin:10px 0}.pref{display:flex;gap:6px;align-items:center}
+.pref-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px;margin:10px 0}.pref{display:flex;gap:6px;align-items:center}.bot-profile{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0}.bot-profile .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .bot-empty{text-align:center;padding:30px;border:1px dashed var(--line2);border-radius:14px}.bot-empty .big{font-size:36px}
 .switch{position:relative;width:46px;height:26px;flex:none;display:inline-block}.switch input{opacity:0;width:0;height:0;position:absolute}
 .slider{position:absolute;inset:0;border-radius:99px;background:#2a3850;transition:.2s;cursor:pointer}.slider::before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;border-radius:50%;background:#fff;transition:.2s}
@@ -3327,7 +3787,7 @@ details.tl-group>summary,details.inc-card>summary{display:flex;gap:8px;align-ite
 /* control center */
 .state-row{align-items:center;gap:12px}.state-row .row{gap:8px;align-items:center}
 .cc-result{border:1px solid var(--line2);border-radius:12px;padding:12px;margin-top:10px;background:#0c1422}.cc-result.ok{border-left:4px solid var(--good)}.cc-result.bad{border-left:4px solid var(--bad)}.cc-result-head{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-bottom:6px}
-.feedback-line{margin:8px 0;min-height:20px}
+.feedback-line{margin:8px 0;min-height:20px}.switch.sm{width:38px;height:22px}.switch.sm .slider::before{width:16px;height:16px}.switch.sm input:checked+.slider::before{transform:translateX(16px)}.switch input:disabled+.slider{opacity:.45;cursor:not-allowed}.switch input:focus-visible+.slider{outline:2px solid var(--acc);outline-offset:2px}.bot-prefs{border:1px solid var(--line);border-radius:14px;background:#0b1220;padding:0;margin-top:12px}.bot-prefs>summary{padding:12px 16px;list-style:none;display:flex;align-items:center;gap:8px}.bot-prefs>summary::-webkit-details-marker{display:none}.bot-prefs>summary::after{content:'▸';margin-left:auto;color:var(--tx3);transition:transform .15s}.bot-prefs[open]>summary::after{transform:rotate(90deg)}.bot-prefs[open]>summary{border-bottom:1px solid var(--line)}.bot-prefs>.bot-card-editor{padding:14px 16px}.bp-intro{font-size:12.5px;line-height:1.5;color:var(--tx3);margin:0 0 4px}.bp-card{border:1px solid var(--line2);border-radius:14px;background:linear-gradient(160deg,#101a2c,#0c1423);padding:14px;margin:12px 0}.bp-card.off{border-style:dashed;background:#0c1220}.bp-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.bp-avatar{width:38px;height:38px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff}.bp-card.off .bp-avatar{background:#2a3850;color:var(--tx3)}.bp-title{flex:1;min-width:140px;display:flex;flex-direction:column;gap:2px}.bp-title strong{font-size:15px}.bp-chip{font-size:12px;font-weight:700;padding:4px 10px;border-radius:99px;border:1px solid var(--line2);background:#14203a;color:var(--tx2);white-space:nowrap}.bp-chip.all{background:rgba(61,220,151,.12);border-color:rgba(61,220,151,.4);color:var(--good)}.bp-chip.off{background:rgba(255,107,122,.12);border-color:rgba(255,107,122,.4);color:var(--bad)}.bp-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0 2px}.bp-status{margin-left:auto;font-size:12px}.bp-arrow{flex:none;width:30px;height:30px;padding:0;border-radius:9px;border:1px solid var(--line2)!important;background:#14203a!important;box-shadow:none!important;min-width:0;cursor:pointer;display:flex;align-items:center;justify-content:center}.bp-arrow:hover{border-color:var(--acc)}.bp-arrow::before{content:'';width:7px;height:7px;border-right:2px solid var(--tx2);border-bottom:2px solid var(--tx2);transform:rotate(45deg);margin-top:-3px;transition:transform .15s}.bp-card.collapsed .bp-arrow::before{transform:rotate(-45deg);margin-top:0;margin-left:-3px}.bp-card.collapsed .bp-title{cursor:pointer}.bp-title{cursor:pointer}.bp-groups{transition:opacity .15s}.bp-group-title{font-size:11px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:var(--tx3);margin:14px 2px 7px}.bp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}.bp-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border:1px solid var(--line);border-radius:11px;background:#0c1422}.bp-row:hover{border-color:var(--line2);background:#101a2c}.bp-label{font-size:13.5px;line-height:1.35}.danger-zone{margin-top:22px;border:1px solid rgba(255,107,122,.55);border-radius:16px;padding:18px;background:linear-gradient(160deg,rgba(60,14,22,.55),rgba(20,8,12,.9))}.dz-head{display:flex;align-items:center;gap:12px;margin-bottom:6px}.dz-ico{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;background:rgba(255,107,122,.16);border:1px solid rgba(255,107,122,.45)}.dz-head h3{margin:0;color:#ff8d99}.dz-text{margin:8px 0 12px;font-size:13.5px;line-height:1.55;color:var(--tx2)}.dz-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:14px}.dz-col{border:1px solid var(--line);border-radius:12px;padding:12px;background:rgba(7,10,17,.55)}.dz-col ul{margin:6px 0 0;padding-left:18px;font-size:13px;line-height:1.7;color:var(--tx2)}.dz-title{font-size:11px;font-weight:800;letter-spacing:.09em;text-transform:uppercase}.dz-title.bad{color:var(--bad)}.dz-title.ok{color:var(--good)}.dz-confirm{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.dz-confirm input{flex:1;min-width:200px;border-color:rgba(255,107,122,.5)!important}button.dz-btn{background:linear-gradient(135deg,#ff5a6b,#d8283f)!important;color:#fff!important;border:0!important}button.dz-btn:disabled{opacity:.4;cursor:not-allowed;filter:grayscale(.4)}
 /* live banner */
 .live-banner{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:95;display:flex;gap:12px;align-items:center;padding:12px 16px;border-radius:14px;background:linear-gradient(135deg,#3a1219,#2a0e14);border:1px solid var(--bad);box-shadow:0 16px 50px rgba(255,107,122,.35);max-width:min(680px,calc(100vw - 24px));animation:lbIn .3s ease}
 .lb-ico{font-size:26px}.lb-text{flex:1;min-width:0}.lb-text strong{color:#ffb3bb}
@@ -3384,6 +3844,10 @@ tr.row-new{background:rgba(61,220,151,.07)}
 </div>
 
 <div class="panel"><div class="section-head"><div><h2>Device Activity</h2><div class="muted">Last observed DNS activity; inactivity does not prove DNS was disabled.</div></div><span id="device-count" class="pill">0 devices</span></div><div id="device-activity" class="device-state"><div class="muted">Loading...</div></div></div><div id="device-detail-panel" class="panel hidden"><div class="section-head"><div><h2>Device Details</h2><div id="device-detail-subtitle" class="muted"></div></div><button type="button" class="neutral" onclick="closeDeviceDetail()">Close</button></div><div id="device-detail-content" class="mini-list"></div></div>
+<div class="panel" id="dash-rules-panel-dev">
+<div class="section-head"><div><h2>Dashboard Alerts</h2><div class="muted">Choose which profiles and which device alerts (went silent, back online, new device) show on this dashboard. Turn all three off for a profile to hide its devices here.</div></div></div>
+<div id="dash-rules-body-dev"></div>
+</div>
 <div id="device-editor" class="panel hidden"><h3>Edit Device</h3><form id="device-edit-form">
 <input type="hidden" name="profile_id"><input type="hidden" name="device_id">
 <label>Device Name<input name="device_name"></label><label>Device Model<input name="device_model"></label>
@@ -3440,6 +3904,10 @@ tr.row-new{background:rgba(61,220,151,.07)}
 <div id="config-form" class="scalable-list"><div class="muted">Load live configuration to edit supported fields.</div></div>
 <div class="row"><button type="button" class="neutral" onclick="loadConfigSection()">Load Live Configuration</button><button type="button" class="neutral" onclick="clearConfigForm()">Clear</button><button type="button" class="start" onclick="saveConfigSection()">Apply Changes</button></div>
 <div class="status" id="config-status">Select a profile and load its live configuration.</div>
+</div>
+<div class="panel" id="dash-rules-panel">
+<div class="section-head"><div><h2>Dashboard Alerts</h2><div class="muted">Choose which profiles and which alert types show on this dashboard. Telegram keeps its own rules below and is not affected.</div></div></div>
+<div id="dash-rules-body"></div>
 </div>
 <div class="panel">
 <div class="section-head"><div><h2>Telegram Alerts</h2><div class="muted">Each bot can receive different kinds of reports, with optional quiet hours.</div></div><button type="button" class="neutral" onclick="previewTelegram()">Preview a report</button></div>
@@ -3554,6 +4022,16 @@ tr.row-new{background:rgba(61,220,151,.07)}
 <div class="mini-item"><span><strong>Rate Limits</strong><br><span class="muted">Shows recent NextDNS API rate-limit telemetry.</span></span><button type="button" class="neutral" onclick="loadRateLimits()">View</button></div>
 <div class="mini-item state-row" id="auth-row"><span><strong>API Authentication</strong><br><span class="muted" id="auth-session">Checking…</span></span><span class="row"><span id="auth-chip" class="state-chip muted">…</span><input id="api-auth-token" type="password" placeholder="Token" style="max-width:210px"><button type="button" id="auth-btn-on" class="start" onclick="configureApiAuth()">Turn ON</button><button type="button" id="auth-btn-off" class="stop" style="display:none" onclick="disableApiAuth()">Turn OFF</button><button type="button" id="auth-btn-logout" class="neutral" style="display:none" onclick="logoutApiAuth()">Log out</button></span></div>
 </div>
+<div class="danger-zone" id="danger-zone">
+<div class="dz-head"><span class="dz-ico">⚠️</span><div><h3>Danger zone</h3><div class="muted small">Reset alert data</div></div></div>
+<p class="dz-text">Erases every alert and everything counted from alerts, so the dashboard starts clean, as if no notification had ever been sent. This cannot be undone.</p>
+<div class="dz-cols">
+<div class="dz-col"><div class="dz-title bad">Will be erased</div><ul><li>All alerts, their delivery history and risk scores</li><li>Incidents and escalations</li><li>Device activity and the "device went silent" state</li><li>Counters, config-change history, activity baseline, last-error markers</li><li>The saved alerts log file</li></ul></div>
+<div class="dz-col"><div class="dz-title ok">Will be kept</div><ul><li>Telegram bots and their settings</li><li>NextDNS profiles and API keys</li><li>Report rules per bot and profile, alert rules, maintenance windows</li><li>The denylist, all other settings and the audit log</li></ul></div>
+</div>
+<div class="dz-confirm"><input id="dz-input" placeholder="Type RESET to confirm" autocomplete="off" oninput="dzCheck()" onkeydown="if(event.key==='Enter')resetAlertData()"><button type="button" id="dz-btn" class="dz-btn" disabled onclick="resetAlertData()">Reset alert data</button></div>
+<div id="dz-result" class="muted small" style="margin-top:10px"></div>
+</div>
 <div id="control-details" class="mini-list"></div>
 </div>
 
@@ -3611,6 +4089,7 @@ function announce(method,path,rawBody,res){
  else if(/^\\/api\\/rules\\/\\d+$/.test(seg))msg='Rule deleted';
  else if(seg==='/api/suppressions')msg='Alert suppression added';
  else if(seg==='/api/retention')msg='Old records cleaned up';
+ else if(seg==='/api/control/reset-alert-data')msg='Alert data reset - the dashboard starts clean';
  else if(seg==='/api/denylist/bulk')msg='Bulk denylist change applied';
  else if(m=seg.match(/^\\/api\\/denylist\\/([^/]+)\\/(.+)$/))msg='Removed "'+decodeURIComponent(m[2])+'" from the denylist of '+acct(m[1]);
  else if(m=seg.match(/^\\/api\\/denylist\\/([^/]+)$/))msg=method==='DELETE'?'Denylist cleared for '+acct(m[1]):'Added "'+(b.domain||'')+'" to the denylist of '+acct(m[1]);
@@ -3663,7 +4142,7 @@ const ORIGIN={dashboard:{label:'You · Dashboard',icon:'🖥',cls:'o-dash',color
 function originBadge(key){const o=ORIGIN[key]||ORIGIN.system;return el('span','origin-badge '+o.cls,o.icon+' '+o.label);}
 function catBadge(cat){const c=CAT[cat]||CAT.other;const b=el('span','cat-badge',c.icon+' '+c.label);b.style.setProperty('--c',c.color);return b;}
 function alertTitle(x){if(x.category==='denylist')return x.status==='denylist_removed'?'Denylist entry removed':'Denylist entry added';return {site:'Blocked site visited',profile:'Profile settings changed',device:'Device went silent',other:'Event'}[x.category]||'Event';}
-const TYPE_TO_CAT={denylist_match:'site',config_change:'profile',config_changed:'profile',configuration_action:'profile',configuration_undo:'profile',denylist_added:'denylist',denylist_removed:'denylist',device_inactive:'device',device_new:'device'};
+const TYPE_TO_CAT={denylist_match:'site',config_change:'profile',config_changed:'profile',configuration_action:'profile',configuration_undo:'profile',denylist_added:'denylist',denylist_removed:'denylist',device_inactive:'device',device_recovered:'device',device_new:'device'};
 function typeBadge(type){return catBadge(TYPE_TO_CAT[type]||'other');}
 let __accountNameMap={};
 function accountLabel(id){return __accountNameMap[id]||id||'System';}
@@ -3779,7 +4258,7 @@ function renderProfileHealth(items){
   card.append(name,status,poll,failures,err,logLine);box.append(card);
  }
 }
-const TYPE_LABELS={denylist_match:['Blocked site visited','site'],denylist_added:['Denylist added','cfg'],denylist_removed:['Denylist removed','cfg'],config_change:['Profile settings changed','cfg'],config_changed:['Profile settings changed','cfg'],configuration_action:['Settings changed (dashboard)','cfg'],configuration_undo:['Change undone','cfg'],device_inactive:['Device inactive','dev'],device_new:['New device','dev']};
+const TYPE_LABELS={denylist_match:['Blocked site visited','site'],denylist_added:['Denylist added','cfg'],denylist_removed:['Denylist removed','cfg'],config_change:['Profile settings changed','cfg'],config_changed:['Profile settings changed','cfg'],configuration_action:['Settings changed (dashboard)','cfg'],configuration_undo:['Change undone','cfg'],device_inactive:['Device inactive','dev'],device_recovered:['Device back online','dev'],device_new:['New device','dev']};
 
 
 
@@ -4134,10 +4613,10 @@ function dashboardPagePanelIds(){
  return {
   overview:['stats','health','recent-alerts-panel','ov-insights-panel','profile-health','event-timeline','hero-dot','runtime'],
   analytics:['an-toolbar','an-kpis','an-timeline','an-donut','an-domains','an-changes','an-devices','analytics-profiles','sentinel-health'],
-  devices:['device-activity','device-editor'],
+  devices:['device-activity','dash-rules-body-dev','device-editor'],
   security:['incidents','global-search','operations-center','alerts','alert-search','alert-type-filter'],
   profiles:['account-form','accounts','profile-editor','config-changes','config-profile','config-readable','config-form','config-section','deny-profile','deny-domain','denylist'],
-  notifications:['telegram-form','telegram-status','telegram-bot-card','telegram-editor'],
+  notifications:['dash-rules-body','telegram-form','telegram-status','telegram-bot-card','telegram-editor'],
   operations:['control-summary','cc-feedback','rules-list','maintenance-preset','control-details','api-auth-token'],
   data:['restore-form','restore-file','save-alert-logs','alert-log-status']
  };
@@ -4262,6 +4741,7 @@ function installEngagementTracking(){
  document.addEventListener('input',e=>{if(e.target&&e.target.closest&&e.target.closest('form,#config-form,.rule-builder,.bot-card-editor'))window.__dirtyUntil=Date.now()+60000;},true);
 }
 function userEngaged(){
+ if(Date.now()<(window.__bpBusyUntil||0))return true;
  if(document.getElementById('detail-modal'))return true;
  const a=document.activeElement;
  if(a&&a!==document.body&&/^(INPUT|TEXTAREA)$/.test(a.tagName)&&a.closest('main,.app-content')&&(a.value||'').length>0&&Date.now()<window.__dirtyUntil)return true;
@@ -4296,6 +4776,19 @@ window.addEventListener('unhandledrejection',event=>{
 });
 
 
+function dzCheck(){const v=(document.getElementById('dz-input').value||'').trim().toUpperCase();document.getElementById('dz-btn').disabled=v!=='RESET';}
+async function resetAlertData(){
+ const inp=document.getElementById('dz-input'),btn=document.getElementById('dz-btn'),out=document.getElementById('dz-result');
+ if((inp.value||'').trim().toUpperCase()!=='RESET')return;
+ btn.disabled=true;out.textContent='Resetting...';out.className='muted small';
+ try{
+  const d=await api('/api/control/reset-alert-data',{method:'POST',body:JSON.stringify({confirm:'RESET'})});
+  out.textContent='Done: '+d.total+' records erased'+(d.log_file_cleared?', alerts log file emptied':'')+'. Bots, profiles and settings were not touched.';out.className='small ok';
+  inp.value='';window.__recentAlertsCache=[];
+  await refresh();await loadControlCenter();
+ }catch(e){out.textContent=(e&&e.message)||'Reset failed';out.className='small error';}
+ dzCheck();
+}
 async function runRetention(){const days=Math.max(1,Number(document.getElementById('retention-days').value)||30);if(!confirm('Clean Sentinel data older than '+days+' days?'))return;try{const d=await api('/api/retention',{method:'POST',body:JSON.stringify({days})});setText('control-details','Retention cleanup removed '+d.deleted+' records.','ok');await refresh();await loadControlCenter();}catch(e){setText('control-details',e.message,'error')}}
 
 
@@ -4637,6 +5130,7 @@ function showLiveBanner(items){
  document.title='(🚫 '+items.length+') NextDNS Sentinel';setTimeout(()=>{document.title='NextDNS Sentinel';},8000);
 }
 function notifyNewDenylistAlerts(alerts){
+ if(window.__dashRulesChanged){window.__dashRulesChanged=false;lastAlertId=Math.max(lastAlertId,...alerts.map(x=>Number(x.id||0)));return;}
  const newest=Math.max(lastAlertId,...alerts.map(x=>Number(x.id||0)));
  const fresh=alerts.filter(x=>Number(x.id||0)>lastAlertId&&x.alert_type==='denylist_match'&&!x.seen_at);
  if(lastAlertId&&fresh.length){
@@ -4775,8 +5269,7 @@ function botCard(bot){
  const info=el('div','bot-info');
  const k1=el('div','kv');k1.append(el('em','','Last notification'),el('span','',bot.last_notification_at?formatDateTime(bot.last_notification_at)+' · '+relTime(bot.last_notification_at):'Nothing sent yet'));info.append(k1);
  if(bot.last_error){const e=el('div','kv err');e.append(el('em','','Last error'),el('span','',bot.last_error));info.append(e);}
- const types=(bot.alert_types||'').split(',').filter(Boolean);
- const k2=el('div','kv');k2.append(el('em','','Receives'),el('span','',types.length?types.map(x=>(TG_TYPES.find(t=>t[0]===x)||[0,x])[1]).join(' · '):'Everything'));info.append(k2);
+ 
  if(bot.quiet_start&&bot.quiet_end){const k3=el('div','kv');k3.append(el('em','','Quiet hours'),el('span','',bot.quiet_start+' – '+bot.quiet_end+' (delivered silently)'));info.append(k3);}
  wrap.append(info);
  const act=el('div','bot-actions');
@@ -4784,16 +5277,144 @@ function botCard(bot){
  b('Send test','neutral',()=>testTelegramBot(bot.id));b('Preview report','neutral',()=>previewTelegram());b('Edit','neutral',()=>editTelegramBot(bot.id));b('Delete','stop',()=>deleteTelegramBot(bot.id));
  wrap.append(act);
  const d=document.createElement('details');d.className='bot-prefs';d.dataset.key='botprefs:'+bot.id;
- d.append(el('summary','','⚙ What this bot receives · quiet hours'));
+ d.append(el('summary','','⏰ Quiet hours'));
  const body=el('div','bot-card-editor');
- const grid=el('div','pref-grid');TG_TYPES.forEach(([k,label])=>{const l=el('label','pref');const c=document.createElement('input');c.type='checkbox';c.value=k;c.checked=!types.length||types.includes(k);l.append(c,document.createTextNode(' '+label));grid.append(l);});
  const qh=el('div','row');const qs=document.createElement('input');qs.type='time';qs.value=bot.quiet_start||'';const qe=document.createElement('input');qe.type='time';qe.value=bot.quiet_end||'';
  qh.append(el('span','muted','Quiet hours (silent delivery) from'),qs,el('span','muted','to'),qe);
- const save=el('button','start','Save preferences');save.onclick=async()=>{const chosen=[...grid.querySelectorAll('input:checked')].map(i=>i.value);const all=chosen.length===TG_TYPES.length;if(!chosen.length){showActionToast('Pick at least one report type, or turn the bot off.','error');return;}
-  await api('/api/settings/telegram/bots/'+bot.id+'/prefs',{method:'POST',body:JSON.stringify({alert_types:all?[]:chosen,quiet_start:qs.value,quiet_end:qe.value})});window.__dirtyUntil=0;};
- body.append(grid,qh,el('div','muted small','Quiet hours still deliver the report, but without a notification sound. Clear both times to disable.'),save);d.append(body);wrap.append(d);
+ const save=el('button','start','Save quiet hours');save.onclick=async()=>{
+  await api('/api/settings/telegram/bots/'+bot.id+'/prefs',{method:'POST',body:JSON.stringify({alert_types:[],quiet_start:qs.value,quiet_end:qe.value})});window.__dirtyUntil=0;};
+ body.append(qh,el('div','muted small','Quiet hours still deliver the report, but without a notification sound. Clear both times to disable.'),save);d.append(body);wrap.append(d);
+ wrap.append(botProfilesPanel(bot));
  return wrap;
 }
+function botProfilesPanel(bot,cfg){
+ cfg=cfg||{};
+ const d=document.createElement('details');d.className='bot-prefs';d.dataset.key=cfg.key||('botprofiles:'+bot.id);
+ d.append(el('summary','',cfg.summary||'👤 Profiles & report types for this bot'));
+ const body=el('div','bot-card-editor');d.append(body);
+ let loaded=false;
+ const rulesUrl=cfg.url||('/api/settings/telegram/bots/'+bot.id+'/rules');
+ const GROUPS=[['site','Blocked sites'],['denylist','Denylist changes'],['profile','Profile settings'],['device','Devices'],['system','Sentinel & system']];
+ const toggle=(on,small)=>{const l=el('label','switch'+(small?' sm':''));const i=document.createElement('input');i.type='checkbox';i.checked=!!on;l.append(i,el('span','slider'));return [l,i];};
+ const load=async()=>{
+  body.replaceChildren(el('div','muted small','Loading profiles...'));
+  let data;
+  try{data=await api(rulesUrl,{_silent:true});}
+  catch(e){body.replaceChildren(el('div','muted small','Could not load profiles.'));loaded=false;return;}
+  body.replaceChildren();
+  if(!data.profiles.length){body.append(el('div','muted small','No profiles yet. Add a NextDNS profile first.'));return;}
+  body.append(el('div','bp-intro',cfg.intro||'Choose which profiles may send reports to this bot and which report types each one sends. Every change saves by itself and is checked against the server. Profiles you do not change keep sending everything.'));
+  const allKeys=data.kinds.map(k=>k.key);
+  const known=GROUPS.map(g=>g[0]);
+  const groups=GROUPS.slice();
+  if(data.kinds.some(k=>known.indexOf(k.category)<0))groups.push(['__other','Other']);
+  data.profiles.forEach(p=>{
+   const card=el('div','bp-card');
+   const head=el('div','bp-head');
+   const ttl=el('div','bp-title');
+   ttl.append(el('strong','',p.name||p.profile_id),el('span','muted small',(p.profile_name?p.profile_name+' \u00b7 ':'')+p.profile_id+(p.active?'':' \u00b7 monitoring paused')));
+   const chip=el('span','bp-chip','');
+   const m=toggle(p.enabled,false);const msw=m[0],cb=m[1];msw.title='Send reports from this profile to this bot';
+   const arrow=el('button','bp-arrow','');arrow.type='button';
+   head.append(arrow,el('div','bp-avatar',String(p.name||p.profile_id||'?').trim().charAt(0).toUpperCase()),ttl,chip,msw);
+   const status=el('span','bp-status muted','');
+   const skey=bot.id+':'+p.profile_id;
+   window.__bpStatus=window.__bpStatus||{};
+   const setStatus=t=>{window.__bpStatus[skey]=t;status.textContent=t;};
+   status.textContent=window.__bpStatus[skey]||'';
+   const bAll=el('button','mini neutral','Turn all on');bAll.type='button';
+   const bNone=el('button','mini neutral','Turn all off');bNone.type='button';
+   const tools=el('div','bp-tools');tools.append(bAll,bNone,status);
+   const wrap=el('div','bp-groups');
+   const boxes=[];
+   const chosen=new Set(p.kinds.length?p.kinds:allKeys);
+   groups.forEach(g=>{
+    const ks=data.kinds.filter(k=>g[0]==='__other'?known.indexOf(k.category)<0:k.category===g[0]);
+    if(!ks.length)return;
+    wrap.append(el('div','bp-group-title',g[1]));
+    const grid=el('div','bp-grid');
+    ks.forEach(k=>{const row=el('div','bp-row');const t=toggle(chosen.has(k.key),true);t[1].value=k.key;row.append(el('span','bp-label',k.label),t[0]);grid.append(row);boxes.push(t[1]);});
+    wrap.append(grid);
+   });
+   const picked=()=>boxes.filter(i=>i.checked).map(i=>i.value);
+   const view=()=>{
+    const n=picked().length;
+    card.classList.toggle('off',!cb.checked);wrap.style.opacity=cb.checked?'1':'.45';
+    boxes.forEach(i=>{i.disabled=!cb.checked;});
+    chip.textContent=cb.checked?(n+' / '+boxes.length+' on'):'Off';
+    chip.className='bp-chip'+(cb.checked?(n===boxes.length?' all':''):' off');
+   };
+   let timer=null,inflight=false,dirty=false;
+   const matches=(rule,mine)=>{
+    if(!mine||mine.enabled!==rule.enabled)return false;
+    if(!rule.enabled)return true;
+    const got=new Set(mine.kinds.length?mine.kinds:allKeys);
+    return got.size===rule.kinds.length&&rule.kinds.every(k=>got.has(k));
+   };
+   const persist=async()=>{
+    if(inflight){dirty=true;return;}
+    inflight=true;
+    try{
+     do{
+      dirty=false;
+      const rule={profile_id:p.profile_id,enabled:cb.checked,kinds:picked()};
+      try{
+       await api(rulesUrl,{method:'POST',body:JSON.stringify({profiles:[rule]}),_silent:true,_skipAutoRefresh:true});
+       const back=await api(rulesUrl,{_silent:true});
+       if(dirty)continue;
+       const mine=back.profiles.find(x=>x.profile_id===p.profile_id);
+       if(matches(rule,mine)){setStatus('Saved and verified \u2713 '+new Date().toLocaleTimeString());if(cfg.onSaved)cfg.onSaved();}
+       else{setStatus('Server had a different state - reloading');loaded=false;load();return;}
+      }catch(e){setStatus('NOT saved - try again');return;}
+     }while(dirty);
+    }finally{inflight=false;window.__bpBusyUntil=Date.now()+1500;}
+   };
+   const schedule=()=>{window.__dirtyUntil=Date.now()+60000;window.__bpBusyUntil=Date.now()+10000;clearTimeout(timer);setStatus('Saving...');timer=setTimeout(persist,350);};
+   cb.onchange=()=>{
+    if(cb.checked&&!picked().length)boxes.forEach(i=>{i.checked=true;});
+    view();schedule();
+   };
+   wrap.addEventListener('change',()=>{
+    if(cb.checked&&!picked().length){cb.checked=false;setStatus('Every report type is off, so this profile is switched off.');}
+    view();schedule();
+   });
+   bAll.onclick=()=>{cb.checked=true;boxes.forEach(i=>{i.checked=true;});view();schedule();};
+   bNone.onclick=()=>{cb.checked=false;view();schedule();};
+   view();
+   card.append(head,tools,wrap);body.append(card);
+   const okey='bpopen:'+skey;
+   window.__bpOpen=window.__bpOpen||{};
+   const readOpen=()=>{if(okey in window.__bpOpen)return window.__bpOpen[okey];try{const v=localStorage.getItem(okey);if(v!==null)return v==='1';}catch(e){}return true;};
+   const showOpen=on=>{card.classList.toggle('collapsed',!on);tools.style.display=on?'':'none';wrap.style.display=on?'':'none';arrow.setAttribute('aria-expanded',on?'true':'false');arrow.title=on?'Hide this profile settings':'Show this profile settings';};
+   const setOpen=on=>{window.__bpOpen[okey]=on;try{localStorage.setItem(okey,on?'1':'0');}catch(e){}showOpen(on);};
+   arrow.onclick=()=>setOpen(card.classList.contains('collapsed'));
+   ttl.onclick=()=>setOpen(card.classList.contains('collapsed'));
+   showOpen(readOpen());
+  });
+ };
+ d.addEventListener('toggle',()=>{if(d.open&&!loaded){loaded=true;load();}});
+ d.__load=()=>{if(!loaded){loaded=true;load();}};
+ return d;
+}
+function buildDashboardRules(force){
+ const box=document.getElementById('dash-rules-body');if(!box)return;
+ if(box.dataset.built&&!force)return;
+ box.dataset.built='1';
+ const p=botProfilesPanel({id:'dash'},{url:'/api/settings/dashboard/rules',key:'dashrules',summary:'👤 Profiles & alert types shown on the dashboard',
+  intro:'Choose which profiles appear on this dashboard and which alert types each one shows. Counters, lists, charts, incidents, devices, search and exports all follow these choices. Monitoring and Telegram are not affected: hidden alerts are still recorded. Every change saves by itself and is checked against the server.',
+  onSaved:()=>{const drop=()=>{Object.keys(__sig).forEach(k=>{delete __sig[k];});};drop();if(window.__dashRulesStale)window.__dashRulesStale();window.__dashRulesChanged=true;clearTimeout(window.__dashRefreshTimer);window.__dashRefreshTimer=setTimeout(()=>{drop();try{refresh();}catch(e){}},1300);}});
+ box.replaceChildren(p);p.open=true;p.__load();
+}
+function buildDashboardRulesDev(force){
+ const box=document.getElementById('dash-rules-body-dev');if(!box)return;
+ if(box.dataset.built&&!force)return;
+ box.dataset.built='1';
+ const p=botProfilesPanel({id:'dash'},{url:'/api/settings/dashboard/rules',key:'dashrules-dev',summary:'👤 Profiles & alert types shown on the dashboard',
+  intro:'Every change saves by itself and is checked against the server. The Devices group decides which device alerts show; with all three off for a profile, its devices are hidden from this page. Monitoring and Telegram are not affected.',
+  onSaved:()=>{const drop=()=>{Object.keys(__sig).forEach(k=>{delete __sig[k];});};drop();if(window.__dashRulesStale)window.__dashRulesStale();window.__dashRulesChanged=true;clearTimeout(window.__dashRefreshTimer);window.__dashRefreshTimer=setTimeout(()=>{drop();try{refresh();}catch(e){}},1300);}});
+ box.replaceChildren(p);p.open=true;p.__load();
+}
+window.__dashRulesStale=()=>{['dash-rules-body','dash-rules-body-dev'].forEach(id=>{const b=document.getElementById(id);if(b&&b.offsetParent===null)delete b.dataset.built;});};
 async function renderBots(){
  const botCardBox=document.getElementById('telegram-bot-card');if(!botCardBox)return;
  const bots=await api('/api/settings/telegram/bots');window.__bots=bots;botCardBox.replaceChildren();
@@ -4806,7 +5427,7 @@ async function previewTelegram(kind){
  try{const k=kind||'denylist_match';const d=await api('/api/settings/telegram/preview?kind='+k,{_quiet:true});
   openDetailModal('Telegram report preview',[],[],'This is exactly how a report looks on Telegram (sample data).');
   const body=document.querySelector('#detail-modal .modal-body');body.replaceChildren(el('div','muted small','Sample data — nothing was sent.'));
-  const tabs=el('div','row');[['denylist_match','🚫 Blocked site'],['denylist_added','➕ Denylist'],['config_changed','🔧 Settings'],['device_inactive','📴 Device']].forEach(([v,l])=>{const b=el('button',v===k?'start':'neutral',l);b.onclick=()=>previewTelegram(v);tabs.append(b);});
+  const tabs=el('div','row');[['denylist_match','🚫 Blocked site'],['denylist_added','➕ Denylist'],['config_changed','🔧 Settings'],['device_recovered','✅ Back online'],['device_inactive','📴 Device']].forEach(([v,l])=>{const b=el('button',v===k?'start':'neutral',l);b.onclick=()=>previewTelegram(v);tabs.append(b);});
   const pre=el('pre','tg-preview');pre.textContent=d.text;body.append(tabs,pre);
  }catch(e){}
 }
@@ -4895,7 +5516,7 @@ async function refresh(){
    if(changed('alerts',alerts.map(x=>[x.id,x.seen_at,x.notification_status,x.notified_at])))renderAlertsTable(alerts);
    await loadIncidents();
   }
-  if(page==='devices'){const d=await api('/api/devices');if(changed('devices',d)&&!document.querySelector('.dev-rename'))renderDevices(d);}
+  if(page==='devices'){buildDashboardRulesDev();const d=await api('/api/devices');if(changed('devices',d)&&!document.querySelector('.dev-rename'))renderDevices(d);}
   if(page==='profiles'){
    if(changed('accounts',acc)){renderAccountsTable(acc);renderGroupedDenylist(acc);}
    syncProfileSelects(acc);
@@ -4903,7 +5524,7 @@ async function refresh(){
    if(changed('deny',[dl,document.getElementById('deny-profile')?.value]))await showSelectedDenylist();
    await loadConfigChanges();
   }
-  if(page==='notifications')await renderBots();
+  if(page==='notifications'){await renderBots();buildDashboardRules();}
   if(page==='operations')await loadControlCenter();
   if(page==='analytics'){await loadRangeAnalytics();await loadSentinelHealth();}
  }catch(e){setText('health','Dashboard error: '+e.message,'error');showActionToast('Refresh failed: '+e.message,'error');}
@@ -5235,7 +5856,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         "telegram_bot_enable": "Telegram bot enabled", "telegram_bot_disable": "Telegram bot disabled", "telegram_bot_delete": "Telegram bot deleted",
         "denylist_add": "Denylist entry added", "denylist_remove": "Denylist entry removed", "denylist_clear": "Denylist cleared",
         "bulk_denylist": "Bulk denylist change", "profile_config_patch": "Profile settings applied", "configuration_undo": "Configuration change undone",
-        "settings_import": "Settings imported", "database_retention": "Old records cleaned up", "alert_suppression": "Alert suppression added",
+        "settings_import": "Settings imported", "database_retention": "Old records cleaned up", "alert_data_reset": "Alert data reset", "dashboard_rules_save": "Dashboard alerts updated", "alert_suppression": "Alert suppression added",
     }
 
     @app.get("/api/timeline")
@@ -5379,7 +6000,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             return jsonify({"error":"Invalid incident status or incident not found."}),400
         features.audit("incident_status","incident",str(incident_id),profile_id=str(before.get("profile_id","")),details={"from":before.get("status",""),"status":status,"domain":before.get("domain",""),"title":before.get("title","")})
         acc=_account_lookup().get(str(before.get("profile_id","")),{})
-        sentinel.notify_report("Incident status updated",[f"Incident: #{incident_id}"]+([f"Domain: {before.get('domain')}"] if before.get("domain") else [])+[f"Account: {acc.get('name','—')}",f"NextDNS profile: {acc.get('profile_name') or '—'}",f"Status: {str(before.get('status','')).upper()} → {status.upper()}"])
+        sentinel.notify_report("Incident status updated",[f"Incident: #{incident_id}"]+([f"Domain: {before.get('domain')}"] if before.get("domain") else [])+[f"Account: {acc.get('name','—')}",f"NextDNS profile: {acc.get('profile_name') or '—'}",f"Status: {str(before.get('status','')).upper()} → {status.upper()}"],profile_id=str(before.get("profile_id","")))
         return jsonify({"updated":True,"status":status})
 
     @app.get("/api/audit")
@@ -5785,7 +6406,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
                 f"Profile: {profile_id}",
                 f"Display name: {display_name}",
                 f"API key rotated: {'yes' if new_api_key else 'no'}",
-            ])
+            ],profile_id=profile_id)
             return jsonify({
                 "saved": True,
                 "profile_id": profile_id,
@@ -5847,7 +6468,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         sentinel.notify_report("Profile monitoring changed",[
             f"Profile: {profile_id}",
             f"Monitoring: {'enabled' if active else 'disabled'}",
-        ])
+        ],profile_id=profile_id)
         if active:
             try:
                 sentinel.start_profile(profile_id)
@@ -5864,7 +6485,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         sentinel.notify_report("Profile removed from Sentinel",[
             f"Profile: {profile_id}",
             "Local monitoring state was deleted.",
-        ])
+        ],profile_id=profile_id)
         store.delete_account(profile_id)
         remaining = [a for a in store.accounts() if a["active"]]
         if remaining:
@@ -5918,6 +6539,28 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         features.audit("telegram_bot_save","telegram_bot",str(bot_id),details={"preferences":"updated"})
         return jsonify({"saved":True})
 
+    @app.get("/api/settings/telegram/bots/<int:bot_id>/rules")
+    def api_telegram_bot_rules_get(bot_id:int) -> Any:
+        if not any(int(b["id"])==bot_id for b in store.telegram_bots()):
+            return jsonify({"error":"Telegram bot not found."}),404
+        rules=store.telegram_bot_rules()
+        profiles=[]
+        for a in store.accounts():
+            r=rules.get((bot_id,str(a["profile_id"])))
+            profiles.append({"profile_id":a["profile_id"],"name":a["name"],"profile_name":a.get("profile_name",""),
+                             "active":bool(a["active"]),"enabled":r["enabled"] if r else True,
+                             "kinds":sorted(r["kinds"]) if r else []})
+        return jsonify({"profiles":profiles,"kinds":[{"key":k,"label":l,"category":c} for k,l,c in REPORT_KIND_CATALOG]})
+
+    @app.post("/api/settings/telegram/bots/<int:bot_id>/rules")
+    def api_telegram_bot_rules_set(bot_id:int) -> Any:
+        d=request_json()
+        rules=d.get("profiles") if isinstance(d.get("profiles"),list) else []
+        if not store.set_telegram_bot_profile_rules(bot_id,rules):
+            return jsonify({"error":"Telegram bot not found."}),404
+        features.audit("telegram_bot_save","telegram_bot",str(bot_id),details={"profile_rules":[{"profile_id":str(r.get("profile_id","")),"enabled":bool(r.get("enabled",True)),"off":[k for k,_l,_c in REPORT_KIND_CATALOG if k not in (r.get("kinds") or [])]} for r in rules if isinstance(r,dict)]})
+        return jsonify({"saved":True})
+
     @app.get("/api/settings/telegram/preview")
     def api_telegram_preview() -> Any:
         kind=str(request.args.get("kind","denylist_match"))
@@ -5926,6 +6569,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             "denylist_match":dict(domain="example-blocked.com",reason="Custom denylist match",status="blocked",matched="example-blocked.com",client_ip="192.0.2.10",device_name="Pixel 8",device_model="Google Pixel",protocol="DNS-over-HTTPS",encrypted=True,ctx={"alert_type":"denylist_match","source":"nextdns_logs"},repeats=2),
             "denylist_added":dict(domain="example-blocked.com",reason="Denylist entry added",status="denylist_added",ctx={"alert_type":"configuration_action","source":"sentinel_dashboard"}),
             "config_changed":dict(domain="",reason="",status="config_changed",ctx={"alert_type":"config_change","source":"nextdns_profile"}),
+            "device_recovered":dict(domain="",reason="DNS activity resumed after 12 min of silence.",status="device_recovered",device_name="Pixel 8",ctx={"alert_type":"device_recovered","source":""}),
             "device_inactive":dict(domain="",reason="No recent DNS activity",status="device_inactive",device_name="Pixel 8",ctx={"alert_type":"device_inactive","source":""}),
         }
         sm=samples.get(kind,samples["denylist_match"])
@@ -6174,6 +6818,8 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
     @app.delete("/api/maintenance")
     def api_maintenance_end()->Any:
         ended=features.end_maintenance()
+        if ended:
+            sentinel.notify_report("Maintenance mode ended",["Maintenance mode was turned off from the dashboard."])
         features.audit("maintenance_end","maintenance","")
         return jsonify({"ended":ended})
 
@@ -6200,7 +6846,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         if scope not in {"global","profile"}: return jsonify({"error":"scope must be global or profile."}),400
         mid=features.add_maintenance(scope,profile_id,seconds,str(data.get("reason","")))
         features.audit("maintenance_start","maintenance",str(mid),profile_id,{"seconds":seconds,"scope":scope})
-        sentinel.notify_report("Maintenance mode enabled",[f"Scope: {scope}",f"Profile: {profile_id or 'all'}",f"Duration: {seconds}s"])
+        sentinel.notify_report("Maintenance mode enabled",[f"Scope: {scope}",f"Profile: {profile_id or 'all'}",f"Duration: {seconds}s"],profile_id=profile_id)
         return jsonify({"created":True,"id":mid})
 
     @app.post("/api/safe-mode")
@@ -6214,6 +6860,67 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         data=request_json(); days=int(data.get("days",30))
         deleted=features.cleanup(days); features.audit("database_retention","database",details={"days":days,"deleted":deleted})
         return jsonify({"deleted":deleted,"days":days})
+
+    @app.post("/api/control/reset-alert-data")
+    def api_reset_alert_data()->Any:
+        data=request_json()
+        if str(data.get("confirm","")).strip().upper()!="RESET":
+            return jsonify({"error":"Type RESET to confirm."}),400
+        deleted=features.reset_alert_data()
+        cleared=False
+        try:
+            if ALERT_LOG_PATH.exists():
+                ALERT_LOG_PATH.write_text("",encoding="utf-8"); cleared=True
+        except OSError:
+            logging.warning("Could not empty the alerts log file %s",ALERT_LOG_PATH,exc_info=True)
+        features.audit("alert_data_reset","database","alerts",details={"deleted":deleted})
+        return jsonify({"reset":True,"deleted":deleted,"total":sum(deleted.values()),"log_file_cleared":cleared})
+
+    _DASH_GET_PATHS = {
+        "/api/stats", "/api/pulse", "/api/alerts", "/api/timeline", "/api/devices", "/api/analytics",
+        "/api/incidents", "/api/delivery", "/api/search", "/api/export/json", "/api/export/csv",
+        "/api/risk-history", "/api/live", "/api/incident-metrics", "/api/config-changes", "/api/health",
+        "/api/domains", "/api/baseline",
+    }
+
+    @app.before_request
+    def dashboard_filter_on():
+        _DASH.rules = None
+        if request.method != "GET":
+            return None
+        path = request.path
+        if path not in _DASH_GET_PATHS and not path.startswith(("/api/devices/", "/api/incidents/")):
+            return None
+        rules = store.dashboard_rules()
+        active = {pid: r for pid, r in rules.items() if (not r["enabled"]) or r["kinds"]}
+        _DASH.rules = active or None
+        return None
+
+    @app.teardown_request
+    def dashboard_filter_off(_exc=None):
+        _DASH.rules = None
+
+    @app.get("/api/settings/dashboard/rules")
+    def api_dashboard_rules_get() -> Any:
+        rules = store.dashboard_rules()
+        profiles = []
+        for a in store.accounts():
+            r = rules.get(str(a["profile_id"]))
+            profiles.append({"profile_id": a["profile_id"], "name": a["name"], "profile_name": a.get("profile_name", ""),
+                             "active": bool(a["active"]), "enabled": r["enabled"] if r else True,
+                             "kinds": sorted(r["kinds"]) if r else []})
+        return jsonify({"profiles": profiles,
+                        "kinds": [{"key": k, "label": l, "category": c} for k, l, c in REPORT_KIND_CATALOG if k in DASHBOARD_KIND_KEYS]})
+
+    @app.post("/api/settings/dashboard/rules")
+    def api_dashboard_rules_set() -> Any:
+        d = request_json()
+        rules = d.get("profiles") if isinstance(d.get("profiles"), list) else []
+        store.set_dashboard_rules(rules)
+        features.audit("dashboard_rules_save", "dashboard", "rules", details={"profile_rules": [
+            {"profile_id": str(r.get("profile_id", "")), "enabled": bool(r.get("enabled", True)),
+             "off": [k for k in DASHBOARD_KIND_KEYS if k not in (r.get("kinds") or [])]} for r in rules if isinstance(r, dict)]})
+        return jsonify({"saved": True})
 
     @app.get("/api/diagnostics")
     def api_diagnostics()->Any:

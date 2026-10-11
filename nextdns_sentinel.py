@@ -855,7 +855,7 @@ class FeatureStore:
         return int(cur.lastrowid)
 
     RESET_ALERT_TABLES = ("incident_alerts", "escalation_events", "delivery_events", "notification_state", "alert_metadata",
-                          "incidents", "alerts", "config_changes", "device_state", "anomaly_baseline", "domain_intelligence",
+                          "incidents", "alerts", "config_changes", "anomaly_baseline", "domain_intelligence",
                           "retention_runs", "rate_limit_events")
     RESET_ID_TABLES = ("alerts", "incidents", "delivery_events", "escalation_events", "config_changes", "retention_runs",
                        "rate_limit_events")
@@ -4026,8 +4026,8 @@ tr.row-new{background:rgba(61,220,151,.07)}
 <div class="dz-head"><span class="dz-ico">⚠️</span><div><h3>Danger zone</h3><div class="muted small">Reset alert data</div></div></div>
 <p class="dz-text">Erases every alert and everything counted from alerts, so the dashboard starts clean, as if no notification had ever been sent. This cannot be undone.</p>
 <div class="dz-cols">
-<div class="dz-col"><div class="dz-title bad">Will be erased</div><ul><li>All alerts, their delivery history and risk scores</li><li>Incidents and escalations</li><li>Device activity and the "device went silent" state</li><li>Counters, config-change history, activity baseline, last-error markers</li><li>The saved alerts log file</li></ul></div>
-<div class="dz-col"><div class="dz-title ok">Will be kept</div><ul><li>Telegram bots and their settings</li><li>NextDNS profiles and API keys</li><li>Report rules per bot and profile, alert rules, maintenance windows</li><li>The denylist, all other settings and the audit log</li></ul></div>
+<div class="dz-col"><div class="dz-title bad">Will be erased</div><ul><li>All alerts, their delivery history and risk scores</li><li>Incidents and escalations</li><li>Counters and analytics, the event timeline, config-change history, activity baseline, last-error markers</li><li>The saved alerts log file</li></ul></div>
+<div class="dz-col"><div class="dz-title ok">Will be kept</div><ul><li>Telegram bots and their settings</li><li>NextDNS profiles and API keys</li><li>Report rules per bot and profile, alert rules, maintenance windows</li><li>Your devices (only their alert numbers go back to zero)</li><li>The denylist, all other settings and the audit log</li></ul></div>
 </div>
 <div class="dz-confirm"><input id="dz-input" placeholder="Type RESET to confirm" autocomplete="off" oninput="dzCheck()" onkeydown="if(event.key==='Enter')resetAlertData()"><button type="button" id="dz-btn" class="dz-btn" disabled onclick="resetAlertData()">Reset alert data</button></div>
 <div id="dz-result" class="muted small" style="margin-top:10px"></div>
@@ -4063,7 +4063,128 @@ function formatDateTime(v){const d=parseDate(v);if(!d)return v?String(v):'—';r
 function formatTime(v){const d=parseDate(v);return d?fmtClock(d,false):'—';}
 function relTime(v){const d=parseDate(v);if(!d)return '—';const s=Math.max(0,Math.round((Date.now()-d.getTime())/1000));if(s<10)return 'just now';if(s<60)return s+'s ago';const m=Math.floor(s/60);if(m<60)return m+' min ago';const h=Math.floor(m/60);if(h<24)return h+' h ago';return Math.floor(h/24)+' d ago';}
 function humanSeconds(sec){sec=Number(sec)||0;if(sec%3600===0&&sec>=3600)return (sec/3600)+' hour'+(sec===3600?'':'s');if(sec%60===0)return (sec/60)+' minutes';return sec+' seconds';}
-function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=text;return e;}
+/* Friendly text layer: nothing technical (JSON, error dumps, table names, code words) is shown to the user as it is.
+   FT.text(s)  - rewrites a string that contains JSON / "Response: {...}" / "HTTP 401 for /path" into plain English
+   FT.token(s) - "denylist_match" -> "Blocked site visited"
+   FT.nice(k)  - "incident_alerts" -> "Incident alerts"
+   A MutationObserver is the safety net: whatever text reaches the page and still looks technical is rewritten. */
+const FT=(function(){
+ const TRIGGER=/[{\\[]\\s*["{\\[\\]}]|Response:|\\bHTTP \\d{3}\\b|\\b[A-Za-z]*(?:Error|Exception):|Traceback|Max retries exceeded/;
+ const LABELS={incident_alerts:'incident links',escalation_events:'escalations',delivery_events:'delivery records',notification_state:'notification states',alert_metadata:'alert details',config_changes:'settings-change records',anomaly_baseline:'activity baselines',domain_intelligence:'domain records',retention_runs:'cleanup records',rate_limit_events:'rate-limit records',device_state:'devices',alerts:'alerts',incidents:'incidents'};
+ const TOKENS={denylist_match:'Blocked site visited',denylist_added:'Denylist entry added',denylist_removed:'Denylist entry removed',config_change:'Profile settings changed',config_changed:'Profile settings changed',configuration_action:'Settings changed (dashboard)',configuration_undo:'Change undone',device_inactive:'Device went silent',device_recovered:'Device back online',device_new:'New device',security_event:'Security event',sent:'Sent',failed:'Failed',skipped:'Skipped',pending:'Pending',delivered:'Delivered',success:'Succeeded',error:'Error',ok:'OK',telegram:'Telegram',dashboard:'Dashboard',blocked:'Blocked',allowed:'Allowed',open:'Open',closed:'Closed',resolved:'Resolved',acknowledged:'Acknowledged',degraded:'Degraded',healthy:'Healthy',disabled:'Disabled',active:'Active',inactive:'Inactive'};
+ const HTTP={400:'the request was not accepted',401:'the API key was not accepted',403:'access was denied',404:'it was not found',408:'the request timed out',409:'the request conflicts with the current settings',422:'some of the data was not valid',429:'too many requests were sent, try again in a minute',500:'the service had a problem on its side',502:'the service had a problem on its side',503:'the service is temporarily unavailable',504:'the service took too long to answer'};
+ function nice(k){const s=String(k==null?'':k).replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/[_\\-]+/g,' ').trim();return s?s.charAt(0).toUpperCase()+s.slice(1):'';}
+ function label(k){return LABELS[k]||nice(k).toLowerCase();}
+ function token(s){const k=String(s==null?'':s).trim();if(!k)return '—';return TOKENS[k]||(LABELS[k]?nice(LABELS[k]):nice(k));}
+ const PAIR=/"?\\b[A-Za-z_]\\w*"\\s*:\\s*(?:-?\\d|"|true\\b|false\\b|null\\b|\\[|\\{)/g;
+ function pairCount(s){const m=s.match(PAIR);return m?m.length:0;}
+ function triggered(s){return typeof s==='string'&&(TRIGGER.test(s)||pairCount(s)>=2);}
+ function pairsToObject(s){
+  const o={};const re=/"?([A-Za-z_]\\w*)"\\s*:\\s*(-?\\d+(?:\\.\\d+)?|true|false|null|"((?:[^"\\\\]|\\\\.)*)")/g;let m;
+  while((m=re.exec(s))!==null){const raw=m[2];o[m[1]]=m[3]!==undefined?m[3]:JSON.parse(raw);}
+  return o;
+ }
+ function tryParse(t){try{return JSON.parse(t);}catch(e){return undefined;}}
+ function pretty(v){
+  if(v===null||v===undefined||v==='')return '—';
+  if(typeof v==='boolean')return v?'Yes':'No';
+  if(typeof v==='number')return String(v);
+  if(typeof v==='string'){const c=v.charAt(0);const p=(c==='{'||c==='[')?tryParse(v):undefined;return (p!==undefined&&typeof p==='object')?pretty(p):v;}
+  if(Array.isArray(v)){if(!v.length)return 'none';return v.map(pretty).join(v.some(x=>x&&typeof x==='object')?'; ':', ');}
+  if(typeof v==='object'){
+   const msg=v.detail||v.message||v.error;
+   if(typeof msg==='string'){const ptr=v.source&&typeof v.source.pointer==='string'?v.source.pointer.split('/').filter(Boolean).pop():'';return msg+(ptr?' ('+nice(ptr).toLowerCase()+')':'');}
+   const ent=Object.entries(v);
+   if(ent.length===1&&['errors','error','data','result','results'].indexOf(ent[0][0])>=0)return pretty(ent[0][1]);
+   if(typeof v.id==='string'&&ent.length<=3)return v.id+(v.active===false?' (off)':'');
+   if(ent.length>2&&ent.every(e=>typeof e[1]==='number')){const nz=ent.filter(e=>e[1]);return nz.length?nz.map(e=>e[1]+' '+label(e[0])).join(', '):'nothing';}
+   return ent.map(e=>nice(e[0])+': '+pretty(e[1])).join(' · ')||'—';
+  }
+  return String(v);
+ }
+ function httpPhrase(code){const n=Number(code);return 'error code '+n+': '+(HTTP[n]||(n>=500?'the service had a problem on its side':'the request failed'));}
+ function salvage(frag){
+  const found=[];const re=/"(?:detail|message|error|title|reason)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/g;let m;
+  while((m=re.exec(frag))!==null)found.push(m[1]);
+  return found.length?found.join('; '):'(more details were cut off)';
+ }
+ function endOf(s,i){
+  const open=s.charAt(i);const close=open==='{'?'}':']';let depth=0,inStr=false;
+  for(let j=i;j<s.length;j++){
+   const c=s.charAt(j);
+   if(inStr){if(c==='\\\\')j++;else if(c==='"')inStr=false;continue;}
+   if(c==='"')inStr=true;
+   else if(c==='{'||c==='[')depth++;
+   else if(c==='}'||c===']'){depth--;if(depth===0)return j;}
+  }
+  return -1;
+ }
+ function replaceEmbedded(s){
+  let out='';let i=0;
+  while(i<s.length){
+   const c=s.charAt(i);
+   if(c==='{'||c==='['){
+    const e=endOf(s,i);
+    if(e<0){out+=salvage(s.slice(i));return out;}
+    const frag=s.slice(i,e+1);const p=tryParse(frag);
+    if(p!==undefined&&typeof p==='object')out+=pretty(p);
+    else if(/^[\\[{]\\s*["{\\[\\]}]/.test(frag))out+=salvage(frag);
+    else out+=frag;
+    i=e+1;continue;
+   }
+   out+=c;i++;
+  }
+  return out;
+ }
+ function text(s){
+  if(!triggered(s))return s;
+  const t=s.trim();
+  if(/Max retries exceeded|ConnectionError|ConnectTimeout|ReadTimeout|Read timed out|Name or service not known|Failed to establish/.test(t))return 'Could not reach NextDNS (network problem or timeout). Sentinel will try again automatically.';
+  if(/psycopg|OperationalError|sqlite3\\.|DatabaseError/.test(t))return 'The database had a problem. Please try again in a moment.';
+  if(t.charAt(0)==='{'||t.charAt(0)==='['){const w=tryParse(t);if(w!==undefined&&typeof w==='object')return pretty(w);}
+  let out=replaceEmbedded(t);
+  out=out.replace(/\\bHTTP (\\d{3})\\b(?: for \\/\\S*[^\\s.,;:])?/g,function(m,c){return httpPhrase(c);});
+  out=out.replace(/ for \\/[^\\s:]*/g,'');
+  if(pairCount(out)>=2&&!/[{\\[]/.test(out)){const lead=out.search(/"?\\b[A-Za-z_]\\w*"\\s*:/);const obj=pairsToObject(out.slice(lead<0?0:lead));if(Object.keys(obj).length)out=out.slice(0,lead<0?0:lead)+pretty(obj);}
+  out=out.replace(/\\b[A-Za-z]*(?:Error|Exception):\\s*/g,'');
+  out=out.replace(/Response:\\s*/g,/NextDNS/.test(out)?'NextDNS said: ':'The server said: ');
+  return out;
+ }
+ const SKIP='textarea,input,select,script,style,noscript,[data-raw],#config-form,.tg-preview,[contenteditable]';
+ function skip(n){return !n||(n.closest&&n.closest(SKIP));}
+ function fixNode(n){
+  if(!n)return;
+  if(n.nodeType===3){
+   const p=n.parentElement;if(!p||skip(p))return;
+   const v=n.nodeValue;
+   if(v&&v.length>3&&triggered(v)){const t=text(v);if(t!==v)n.nodeValue=t;}
+  }else if(n.nodeType===1){
+   if(skip(n))return;
+   const ti=n.getAttribute&&n.getAttribute('title');
+   if(ti&&triggered(ti)){const t2=text(ti);if(t2!==ti)n.setAttribute('title',t2);}
+   const w=document.createTreeWalker(n,NodeFilter.SHOW_TEXT);const list=[];let x;
+   while((x=w.nextNode()))list.push(x);
+   list.forEach(fixNode);
+   if(n.querySelectorAll)n.querySelectorAll('[title]').forEach(function(e){const ti2=e.getAttribute('title');if(ti2&&triggered(ti2)&&!skip(e)){const t3=text(ti2);if(t3!==ti2)e.setAttribute('title',t3);}});
+  }
+ }
+ function start(){
+  if(!document.body||window.__ftObserver)return;
+  fixNode(document.body);
+  window.__ftObserver=new MutationObserver(function(muts){
+   for(const m of muts){
+    if(m.type==='characterData')fixNode(m.target);
+    else if(m.type==='attributes')fixNode(m.target);
+    else m.addedNodes.forEach(fixNode);
+   }
+  });
+  window.__ftObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['title']});
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
+ return {text:text,token:token,nice:nice,pretty:pretty,fix:fixNode};
+})();
+
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=FT.text(text);return e;}
 function formatTimestampCell(td,value){td.textContent=formatDateTime(value);td.title=value||'';}
 
 function showActionToast(message,type='error'){
@@ -4124,7 +4245,7 @@ async function api(path,options={}){
   const r=await fetch(path,{...options,headers});
   const d=await r.json().catch(()=>({}));
   if(r.status===401){if(!window.__authReload){window.__authReload=true;clearInterval(window.__sentinelRefreshTimer);showActionToast('Please log in again…','info');setTimeout(()=>location.reload(),500);}return new Promise(()=>{});}
-  if(!r.ok)throw new Error(d.error||'HTTP '+r.status);
+  if(!r.ok)throw new Error(FT.text(String(d.error||('HTTP '+r.status))));
   if(method!=='GET'){
    if(!options._skipAutoRefresh)scheduleAutoRefresh();
    if(!options._silent && !SILENT_PATHS.some(re=>re.test(path)))announce(method,path,options.body,d);
@@ -4178,10 +4299,10 @@ async function loadDeviceDetail(profileId,deviceId){
   panel.classList.remove('hidden');box.replaceChildren();
   const device=d.device||{};
   setText('device-detail-subtitle',(device.account_name||profileId)+' · '+(device.device_name||deviceId)+' · '+(d.alerts?.length||0)+' alerts','muted');
-  const fields=[['Device ID',device.device_id],['Model',device.device_model],['Client IP',device.client_ip],['Status',device.last_status],['Last Domain',device.last_domain],['Last Seen',formatDateTime(device.last_seen_at)]];
+  const fields=[['Device ID',device.device_id],['Model',device.device_model],['Client IP',device.client_ip],['Status',FT.token(device.last_status)],['Last Domain',device.last_domain],['Last Seen',formatDateTime(device.last_seen_at)]];
   for(const [label,value] of fields){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<strong></strong><span></span>';row.firstChild.textContent=label;row.lastChild.textContent=value||'—';box.append(row);}
   const heading=document.createElement('div');heading.className='muted';heading.style.marginTop='8px';heading.textContent='Recent device alerts';box.append(heading);
-  for(const a of d.alerts||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=(a.alert_type||'event')+' · '+(a.domain||a.reason||'No domain');row.lastChild.textContent=formatDateTime(a.event_timestamp||a.created_at);row.title=a.reason||'';box.append(row);}
+  for(const a of d.alerts||[]){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=FT.token(a.alert_type||'event')+' · '+(a.domain||FT.text(a.reason||'')||'No domain');row.lastChild.textContent=formatDateTime(a.event_timestamp||a.created_at);row.title=a.reason||'';box.append(row);}
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});
  }catch(e){setText('device-detail-content','Details failed: '+e.message,'error');}
 }
@@ -4199,10 +4320,10 @@ async function runGlobalSearch(){
  for(const x of items){const row=document.createElement('div');row.className='mini-item';row.innerHTML='<span></span><strong></strong>';row.firstChild.textContent=x.type.toUpperCase()+' #'+x.id+' · '+(x.domain||x.profile_id);row.lastChild.textContent=formatDateTime(x.timestamp);row.title=x.reason||'';box.append(row);}
 }
 async function loadAudit(){
- const items=await api('/api/audit?limit=30');renderOperationList(items.map(x=>({main:x.action+' · '+x.target_type+' '+x.target_id,sub:x.actor+' · '+formatDateTime(x.created_at)})));
+ const items=await api('/api/audit?limit=30');renderOperationList(items.map(x=>({main:x.title||FT.nice(x.action),sub:(x.summary?x.summary+' · ':'')+formatDateTime(x.created_at)})));
 }
 async function loadDelivery(){
- const items=await api('/api/delivery?limit=30');renderOperationList(items.map(x=>({main:x.channel.toUpperCase()+' · '+x.status+' · alert '+(x.alert_id||'—'),sub:x.account_name+' · '+formatDateTime(x.created_at)+(x.error?' · '+x.error:'')})));
+ const items=await api('/api/delivery?limit=30');renderOperationList(items.map(x=>({main:FT.token(x.channel)+' · '+FT.token(x.status)+' · alert #'+(x.alert_id||'—'),sub:x.account_name+' · '+formatDateTime(x.created_at)+(x.error?' · '+x.error:'')})));
 }
 async function loadBulkHistory(){
  const items=await api('/api/bulk-history?limit=30');renderOperationList(items.map(x=>({main:x.operation.toUpperCase()+' · '+x.domain,sub:'#'+x.id+' · '+x.successes+' success · '+x.failures+' failed · '+x.skipped+' skipped'})));
@@ -4281,7 +4402,7 @@ function openDetailModal(title,headers,rows,note){
 const transientStatusIds=new Set(['account-message','profile-edit-message','bulk-result','config-status','telegram-edit-message','alert-log-status']);
 function setText(id,text,cls=''){
  const e=document.getElementById(id);if(!e)return;
- e.textContent=text;e.className=cls;
+ e.textContent=FT.text(text);e.className=cls;
  if(transientStatusIds.has(id)){
   window.__statusTimers=window.__statusTimers||{};
   clearTimeout(window.__statusTimers[id]);
@@ -4507,8 +4628,8 @@ async function loadConfigChanges(){
   if(!items.length){box.textContent='No configuration changes detected.';return;}
   for(const x of items.slice(0,50)){
    const details=document.createElement('details');details.className='account';const summary=document.createElement('summary');summary.style.cursor='pointer';
-   summary.textContent=x.profile_id+' · '+x.change_type+' · '+formatDateTime(x.changed_at)+(x.undone_at?' · Undone':'');
-   const body=document.createElement('div');body.className='mini-list';const meta=document.createElement('div');meta.className='muted';meta.textContent='Trigger: '+(x.source||'unknown')+' · Time: '+formatDateTime(x.changed_at);body.append(meta);
+   summary.textContent=accountLabel(x.profile_id)+' · '+FT.nice(x.change_type)+' · '+formatDateTime(x.changed_at)+(x.undone_at?' · Undone':'');
+   const body=document.createElement('div');body.className='mini-list';const meta=document.createElement('div');meta.className='muted';meta.textContent='Changed from: '+FT.token(x.source||'unknown')+' · Time: '+formatDateTime(x.changed_at);body.append(meta);
    let before={},after={};try{before=JSON.parse(x.before_json||'{}');after=JSON.parse(x.after_json||'{}');const unwrap=o=>(o&&Object.keys(o).length===1&&o.data&&typeof o.data==='object')?o.data:o;before=unwrap(before);after=unwrap(after);}catch(e){}
    const diffs=configChangeDiff(before,after);
    if(!diffs.length){const empty=document.createElement('div');empty.className='muted';empty.textContent='No field-level difference recorded.';body.append(empty);}
@@ -4851,7 +4972,7 @@ async function addSuppression(){
 
 
 async function exportSettings(){const d=await api('/api/settings/export');const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='nextdns-sentinel-settings.json';a.click();URL.revokeObjectURL(a.href);}
-async function importSettings(input){if(!input.files?.[0])return;try{const text=await input.files[0].text();const d=await api('/api/settings/import',{method:'POST',body:text});setText('control-details','Imported '+JSON.stringify(d.imported),'ok');loadControlCenter();}catch(e){setText('control-details',e.message,'error')}input.value='';}
+async function importSettings(input){if(!input.files?.[0])return;try{const text=await input.files[0].text();const d=await api('/api/settings/import',{method:'POST',body:text});setText('control-details','Imported '+((d.imported&&d.imported.settings)||0)+' setting(s) and '+((d.imported&&d.imported.rules)||0)+' rule(s)','ok');loadControlCenter();}catch(e){setText('control-details',e.message,'error')}input.value='';}
 
 
 // Start the dashboard only after every dashboard function has been declared.
@@ -5616,6 +5737,127 @@ function buildArrayControl(value,path,label,parent){
  add.append(inp,addBtn);box.append(list,add,hidden);hidden.value=JSON.stringify(items);parent.append(box);
 }
 
+/* Configuration editor in plain language: friendly names + one-line explanations for every NextDNS setting,
+   readable summaries (On/Off, "30 days", lists of names) and no JSON anywhere. These declarations come after the
+   originals in the page script, so they replace them. */
+const CFG_INFO={
+ threatIntelligenceFeeds:['Threat intelligence feeds','Blocks domains known for malware, phishing and scams.'],
+ aiThreatDetection:['AI-based threat detection','Spots brand-new threats automatically.'],
+ googleSafeBrowsing:['Google Safe Browsing','Also blocks sites that Google marks as unsafe.'],
+ cryptojacking:['Block cryptojacking','Stops sites that secretly use the device to mine cryptocurrency.'],
+ dnsRebinding:['Protect against DNS rebinding','Stops websites from attacking devices on the home network.'],
+ idnHomographs:['Block look-alike domains','Blocks domains that imitate real ones with similar-looking characters.'],
+ typosquatting:['Block misspelled domains','Blocks typo versions of popular sites.'],
+ dga:['Block auto-generated domains','Blocks random-looking domains created by malware.'],
+ nrd:['Block newly registered domains','Domains registered in the last 30 days are often used for abuse.'],
+ ddns:['Block dynamic DNS domains','Free hostnames that malware often uses.'],
+ parking:['Block parked domains','Domains that only show ads or a placeholder page.'],
+ csam:['Block child-abuse material','Blocks domains known to host it.'],
+ tlds:['Blocked domain endings','Whole endings such as .xyz or .top.'],
+ blocklists:['Blocklists','Lists of ads and trackers that are blocked.'],
+ natives:['Built-in tracker protection','Blocks tracking built into device and TV brands.'],
+ allowAffiliate:['Allow affiliate and tracking links','Lets affiliate and tracking links work.'],
+ disguisedTrackers:['Block disguised trackers','Blocks trackers hiding behind ordinary-looking names.'],
+ services:['Blocked apps and websites','Apps and sites that are blocked for this profile.'],
+ categories:['Blocked categories','Whole kinds of content that are blocked.'],
+ safeSearch:['Force safe search','Hides adult results in search engines.'],
+ youtubeRestrictedMode:['YouTube restricted mode','Hides mature YouTube videos.'],
+ blockBypass:['Block VPN and proxy bypass','Stops ways of getting around these rules.'],
+ recreation:['Only during free time','Applies only in the free-time hours.'],
+ logs:['Activity logs',''],
+ enabled:['Enabled',''],
+ drop:["Don't record",'Details that are left out of the logs.'],
+ ip:['Device IP addresses',''],
+ domain:['Domain names',''],
+ retention:['Keep logs for','How long the logs are stored.'],
+ location:['Log storage location','Region where logs are stored: eu, us, ch or gb.'],
+ blockPage:['Block page','Shows a page when a site is blocked.'],
+ performance:['Performance',''],
+ ecs:['Send approximate location','Helps websites pick a nearby server (ECS).'],
+ cacheBoost:['Cache boost','Keeps answers longer to speed things up.'],
+ cnameFlattening:['CNAME flattening','Speeds up lookups for chained names.'],
+ web3:['Web3 domains','Lets blockchain domains work.'],
+ name:['Profile name',''],
+ denylist:['Denylist','Sites that are always blocked.'],
+ allowlist:['Allowlist','Sites that are never blocked.'],
+ rewrites:['DNS rewrites','Names that are answered with a custom address.'],
+ security:['Security',''],privacy:['Privacy',''],parentalControl:['Parental control',''],settings:['Settings',''],
+ id:['Name',''],active:['On',''],content:['Points to','']
+};
+function configLabel(label){const k=String(label==null?'':label);const i=CFG_INFO[k];return (i&&i[0])||FT.nice(k)||'Value';}
+function cfgHint(label){const i=CFG_INFO[String(label==null?'':label)];return (i&&i[1])||'';}
+function cfgDuration(sec){
+ const n=Number(sec);if(!isFinite(n)||n<=0)return 'Not kept';
+ const units=[['year',31536000],['month',2592000],['week',604800],['day',86400],['hour',3600],['minute',60]];
+ for(const u of units){if(n>=u[1]&&n%u[1]===0){const c=n/u[1];return c+' '+u[0]+(c===1?'':'s');}}
+ return Math.round(n/3600*10)/10+' hours';
+}
+function cfgShow(v,key){
+ if(typeof v==='boolean')return v?'On':'Off';
+ if(v===null||v===undefined||v==='')return '—';
+ if(typeof v==='number')return key==='retention'?cfgDuration(v):String(v);
+ if(Array.isArray(v)){
+  if(!v.length)return 'None';
+  return v.map(function(x){
+   if(x&&typeof x==='object'&&typeof x.id==='string'){return (key==='tlds'?'.'+x.id.replace(/^\\./,''):x.id)+(x.active===false?' (off)':'');}
+   return FT.pretty(x);
+  }).join(', ');
+ }
+ return String(v);
+}
+function renderConfigReadable(value){
+ const box=document.getElementById('config-readable');box.replaceChildren();
+ const row=function(label,val,head){const r=document.createElement('div');r.className='mini-item';r.innerHTML='<strong></strong><span></span>';r.firstChild.textContent=label;r.lastChild.textContent=val;if(head)r.firstChild.style.opacity='.85';box.append(r);};
+ if(Array.isArray(value)){
+  if(!value.length){row('Nothing here yet','');return;}
+  value.forEach(function(x){row((x&&typeof x==='object'&&typeof x.id==='string')?x.id:FT.pretty(x),(x&&x.active===false)?'Off':'On');});
+  return;
+ }
+ const walk=function(obj,prefix){
+  for(const e of Object.entries(obj||{})){
+   const k=e[0],v=e[1];const label=(prefix?prefix+' › ':'')+configLabel(k);
+   if(v&&typeof v==='object'&&!Array.isArray(v)){row(label,'',true);walk(v,label);}
+   else row(label,cfgShow(v,k));
+  }
+ };
+ walk(value,'');
+}
+function renderConfigForm(value){
+ const box=document.getElementById('config-form');box.replaceChildren();
+ configFormSource=JSON.parse(JSON.stringify(value||{}));
+ if(Array.isArray(value)){box.append(el('div','muted','This list is shown for reference. Change it from the Denylist tools.'));return;}
+ if(!value||typeof value!=='object'){box.textContent='No editable configuration was returned.';return;}
+ for(const e of Object.entries(value))buildConfigControl(e[1],[e[0]],e[0],box);
+}
+function buildConfigControl(value,path,label,parent){
+ const tip=cfgHint(label);
+ if(value&&typeof value==='object'&&!Array.isArray(value)){
+  const details=document.createElement('details');details.open=true;details.style.margin='6px 0';
+  const summary=document.createElement('summary');summary.style.cursor='pointer';summary.textContent=configLabel(label);
+  if(tip){const h=document.createElement('span');h.className='cfg-hint muted small';h.textContent=' — '+tip;summary.append(h);}
+  details.append(summary);
+  for(const e of Object.entries(value))buildConfigControl(e[1],path.concat(e[0]),e[0],details);
+  parent.append(details);return;
+ }
+ if(Array.isArray(value)){
+  buildArrayControl(value,path,label,parent);
+  const box=parent.lastElementChild;const title=box&&box.querySelector&&box.querySelector('.tag-title');
+  if(title&&tip){const h=document.createElement('div');h.className='cfg-hint muted small';h.textContent=tip;title.after(h);}
+  return;
+ }
+ const row=document.createElement('label');row.style.margin='6px 0';
+ row.append(document.createTextNode(configLabel(label)));
+ if(tip){const h=document.createElement('span');h.className='cfg-hint muted small';h.textContent=' — '+tip;row.append(h);}
+ const input=document.createElement('input');input.dataset.path=JSON.stringify(path);
+ if(typeof value==='boolean'){input.type='checkbox';input.checked=value;input.dataset.kind='boolean';}
+ else if(typeof value==='number'){
+  input.type='number';input.step=Number.isInteger(value)?'1':'any';input.value=String(value);input.dataset.kind='number';
+  if(label==='retention'){const h=document.createElement('span');h.className='cfg-hint muted small';h.textContent=' seconds = '+cfgDuration(value);input.addEventListener('input',function(){h.textContent=' seconds = '+cfgDuration(input.value);});row.append(input,h);parent.append(row);return;}
+ }
+ else{input.type='text';input.value=value==null?'':String(value);input.dataset.kind='string';}
+ row.append(input);parent.append(row);
+}
+
 /* ---------- API authentication: clear state, real logout, turn OFF ---------- */
 async function loadAuthStatus(){
  const row=document.getElementById('auth-row');if(!row)return;
@@ -5839,14 +6081,163 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         out = {} if out is None else out
         if isinstance(value, dict):
             for k, v in value.items():
-                _flat(v, f"{prefix} › {k}" if prefix else str(k), out)
+                _flat(v, f"{prefix} › {_nice(k)}" if prefix else _nice(k), out)
         else:
-            out[prefix or "value"] = json.dumps(value, ensure_ascii=False, default=str)
+            out[prefix or "Value"] = _plain_value(value)
         return out
 
     def _diff_pairs(before: Any, after: Any) -> list[dict[str, str]]:
         b = _flat(unwrap_profile_data(before)); a = _flat(unwrap_profile_data(after))
         return [{"field": k, "from": b.get(k, "—"), "to": a.get(k, "—")} for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)]
+
+    _TABLE_LABELS = {
+        "incident_alerts": "incident links", "escalation_events": "escalations", "delivery_events": "delivery records",
+        "notification_state": "notification states", "alert_metadata": "alert details", "config_changes": "settings-change records",
+        "anomaly_baseline": "activity baselines", "domain_intelligence": "domain records", "retention_runs": "cleanup records",
+        "rate_limit_events": "rate-limit records", "device_state": "devices", "alerts": "alerts", "incidents": "incidents",
+    }
+    _KIND_NAMES = {k: re.sub(r"^[^A-Za-z0-9]+", "", l) for k, l, _c in REPORT_KIND_CATALOG}
+
+    def _nice(key: Any) -> str:
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(key)).replace("_", " ").replace("-", " ").strip()
+        return text[:1].upper() + text[1:]
+
+    def _plain_value(value: Any) -> str:
+        """Any stored value as a short human phrase (never JSON)."""
+        if value is None or value == "":
+            return "—"
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return "none"
+            sep = "; " if any(isinstance(x, (dict, list, tuple)) for x in value) else ", "
+            return sep.join(_plain_value(x) for x in value)
+        if isinstance(value, dict):
+            msg = value.get("detail") or value.get("message") or value.get("error")
+            if isinstance(msg, str):
+                return msg
+            if len(value) == 1 and next(iter(value)) in ("errors", "error", "data", "result", "results"):
+                return _plain_value(next(iter(value.values())))
+            if isinstance(value.get("id"), str) and len(value) <= 3:
+                return value["id"] + (" (off)" if value.get("active") is False else "")
+            return " · ".join(f"{_nice(k)}: {_plain_value(v)}" for k, v in value.items()) or "—"
+        return str(value)
+
+    def _plain_counts(counts: Any) -> str:
+        if not isinstance(counts, dict):
+            return _plain_value(counts)
+        parts = [f"{n} {_TABLE_LABELS.get(k, _nice(k).lower())}" for k, n in counts.items() if isinstance(n, (int, float)) and n]
+        return ", ".join(parts) if parts else "nothing (there was nothing to erase)"
+
+    def _duration(seconds: Any) -> str:
+        try:
+            s = int(seconds)
+        except (TypeError, ValueError):
+            return _plain_value(seconds)
+        if s < 90:
+            return f"{s} seconds"
+        if s < 5400:
+            return f"{round(s / 60)} minutes"
+        if s < 129600:
+            return f"{round(s / 3600)} hours"
+        return f"{round(s / 86400)} days"
+
+    _HTTP_MEANING = {400: "the request was not accepted", 401: "the API key was not accepted", 403: "access was denied",
+                     404: "it was not found", 408: "the request timed out", 409: "the request conflicts with the current settings",
+                     422: "some of the data was not valid", 429: "too many requests were sent, try again in a minute",
+                     503: "the service is temporarily unavailable", 504: "the service took too long to answer"}
+
+    def _plain_error(text: Any) -> str:
+        """An error message without JSON, HTTP codes spelled as code or API paths."""
+        text = str(text or "")
+        cut = min([i for i in (text.find("{"), text.find("[")) if i >= 0] or [-1])
+        if cut >= 0:
+            try:
+                text = text[:cut] + _plain_value(json.loads(text[cut:]))
+            except ValueError:
+                text = text[:cut].rstrip(" :") or "details unavailable"
+        text = re.sub(r"\bHTTP (\d{3})\b(?: for /\S*[^\s.,;:])?",
+                      lambda m: f"error code {m.group(1)}: " + _HTTP_MEANING.get(int(m.group(1)), "the service had a problem on its side" if int(m.group(1)) >= 500 else "the request failed"), text)
+        text = re.sub(r" for /[^\s:]*", "", text)
+        text = re.sub(r"\b[A-Za-z]*(?:Error|Exception):\s*", "", text)
+        return text.replace("Response: ", "NextDNS said: " if "NextDNS" in text else "The server said: ").strip()
+
+    def _rules_lines(rules: Any, accounts: dict, what: str) -> list[tuple[str, str]]:
+        out = []
+        for r in rules if isinstance(rules, list) else []:
+            if not isinstance(r, dict):
+                continue
+            pid = str(r.get("profile_id", ""))
+            name = (accounts.get(pid) or {}).get("name") or pid
+            off = [_KIND_NAMES.get(k, _nice(k)) for k in (r.get("off") or [])]
+            if not r.get("enabled", True):
+                out.append((name, f"switched off ({what})"))
+            elif off:
+                out.append((name, f"{len(off)} report type{'s' if len(off) != 1 else ''} off: " + ", ".join(off)))
+            else:
+                out.append((name, "everything on"))
+        return out
+
+    def _audit_plain(action: str, details: Any, target_type: str, target_id: str, accounts: dict) -> list[tuple[str, str]]:
+        """Label/value lines describing an audit-log entry in plain English."""
+        d = details if isinstance(details, dict) else {}
+        pname = lambda pid: (accounts.get(str(pid)) or {}).get("name") or str(pid)  # noqa: E731
+        L: list[tuple[str, str]] = []
+        if action == "alert_data_reset":
+            L.append(("Erased", _plain_counts(d.get("deleted"))))
+        elif action == "database_retention":
+            L += [("Older than", f"{d.get('days', '?')} days"), ("Cleaned up", f"{_plain_value(d.get('deleted', 0))} records")]
+        elif action == "settings_import":
+            ns, nr = int(d.get("settings", 0) or 0), int(d.get("rules", 0) or 0)
+            L.append(("Imported", f"{ns} setting{'s' if ns != 1 else ''} and {nr} rule{'s' if nr != 1 else ''}"))
+        elif action in ("dashboard_rules_save", "telegram_bot_save") and "profile_rules" in d:
+            L += _rules_lines(d.get("profile_rules"), accounts, "no reports" if action == "telegram_bot_save" else "hidden on the dashboard")
+        elif action == "telegram_bot_save":
+            L.append(("Bot", d["name"]) if d.get("name") else ("Result", "Notification preferences updated"))
+        elif action == "telegram_configured":
+            L.append(("Result", "Telegram chat saved"))
+        elif action == "bulk_denylist":
+            L += [("Action", _nice(d.get("action", ""))), ("Domain", target_id),
+                  ("Result", f"{d.get('successes', 0)} succeeded, {d.get('failures', 0)} failed, {d.get('skipped', 0)} skipped")]
+        elif action == "configuration_undo":
+            L += [("Change", f"#{d.get('change_id', '?')}"), ("Restored", ", ".join(_nice(f) for f in d.get("fields", [])) or "—")]
+        elif action == "device_update":
+            L.append(("Edited", ", ".join(_nice(f) for f in d.get("fields", [])) or "—"))
+        elif action in ("denylist_add", "denylist_remove"):
+            L.append(("Domain", str(d.get("domain", ""))))
+        elif action == "denylist_clear":
+            L.append(("Removed", f"{d.get('removed', 0)} denylist entries"))
+        elif action == "monitor_start":
+            L.append(("Profiles monitored", str(d.get("accounts", 0))))
+        elif action == "profile_config_patch":
+            L += [("Section", _nice(d.get("section", ""))), ("Change", f"#{d.get('change_id', '?')}")]
+        elif action == "local_profile_update":
+            L += [("Display name", str(d.get("display_name", ""))), ("API key", "replaced" if d.get("api_key_rotated") else "unchanged")]
+        elif action == "profile_monitor_toggle":
+            L.append(("Monitoring", "on" if d.get("active") else "off"))
+        elif action == "profile_delete":
+            L.append(("Profile", pname(target_id)))
+        elif action == "maintenance_start":
+            L += [("Duration", _duration(d.get("seconds"))), ("Applies to", _nice(d.get("scope", "all profiles")))]
+        elif action == "alert_suppression":
+            L += [("Muted for", _duration(d.get("seconds"))), ("Reason", str(d.get("reason", "")) or "—")]
+        elif action == "rule_save":
+            L += [("Rule", str(d.get("name", ""))), ("Does", _nice(d.get("action", "")))]
+        elif action in ("api_auth_configure", "api_auth_disable"):
+            L.append(("Dashboard password protection", "on" if d.get("enabled") else "off"))
+        elif action == "notification_escalation":
+            L.append(("Escalation level", str(d.get("level", ""))))
+        elif action == "device_recovered_error":
+            L.append(("Problem", _plain_error(d.get("error"))))
+        elif action == "database_restore":
+            L += [("Backup file", str(d.get("filename", ""))), ("Safety copy", "kept" if d.get("rollback") else "none")]
+        else:
+            for k, v in list(d.items())[:8]:
+                L.append((_nice(k), _plain_value(v)))
+        return [(a, b) for a, b in L if str(b).strip() != ""]
 
     AUDIT_TITLES = {
         "incident_status": "Incident status changed", "safe_mode": "Safe Mode", "maintenance_start": "Maintenance mode enabled",
@@ -5857,6 +6248,11 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
         "denylist_add": "Denylist entry added", "denylist_remove": "Denylist entry removed", "denylist_clear": "Denylist cleared",
         "bulk_denylist": "Bulk denylist change", "profile_config_patch": "Profile settings applied", "configuration_undo": "Configuration change undone",
         "settings_import": "Settings imported", "database_retention": "Old records cleaned up", "alert_data_reset": "Alert data reset", "dashboard_rules_save": "Dashboard alerts updated", "alert_suppression": "Alert suppression added",
+        "database_restore": "Database restored from a backup", "telegram_configured": "Telegram chat saved",
+        "telegram_enabled": "Telegram notifications enabled", "telegram_disabled": "Telegram notifications disabled",
+        "telegram_credentials_deleted": "Telegram credentials deleted", "maintenance_end": "Maintenance mode ended",
+        "api_auth_configure": "Dashboard password protection turned on", "api_auth_disable": "Dashboard password protection turned off",
+        "notification_escalation": "Notification escalated", "device_recovered_error": "Device recovery check failed",
     }
 
     @app.get("/api/timeline")
@@ -5892,7 +6288,14 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             events.append({"time": change.get("changed_at") or "", "title": "Settings change · " + str(change.get("change_type") or "profile"),
                            "lines": [], "diff": diff[:30], "kind": "config", "category": "profile", "origin": key, "origin_label": label,
                            "undone": bool(change.get("undone_at")), **who(change.get("profile_id", "")), "change_id": change.get("id")})
+        try:
+            _floor_ms = int(store.setting("alerts_reset_floor_ms", "0") or 0)
+        except (TypeError, ValueError):
+            _floor_ms = 0
+        _floor_iso = datetime.fromtimestamp(_floor_ms / 1000, timezone.utc).isoformat() if _floor_ms else ""
         for audit in features.audit_entries(120):
+            if _floor_iso and str(audit.get("created_at") or "") < _floor_iso:
+                continue
             action = str(audit.get("action") or "")
             try:
                 details = json.loads(audit.get("details") or "{}")
@@ -5907,10 +6310,7 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
             elif action == "safe_mode":
                 lines.append(("State", "ON" if details.get("enabled") else "OFF"))
             else:
-                for k, v in list(details.items())[:6]:
-                    lines.append((str(k).replace("_", " ").title(), json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else str(v)))
-                if audit.get("target_id") and not lines:
-                    lines.append(("Target", str(audit["target_id"])))
+                lines.extend(_audit_plain(action, details, str(audit.get("target_type") or ""), str(audit.get("target_id") or ""), accounts))
             events.append({"time": audit.get("created_at") or "", "title": AUDIT_TITLES.get(action, action.replace("_", " ").title() or "Sentinel action"),
                            "lines": lines, "kind": "audit", "category": "other", "origin": "dashboard", "origin_label": origin_of("sentinel_dashboard")[1],
                            **who(audit.get("profile_id", "")), "audit_id": audit.get("id")})
@@ -6005,7 +6405,18 @@ def create_app(store: Store, sentinel: Sentinel, features: FeatureStore) -> Flas
 
     @app.get("/api/audit")
     def api_audit() -> Any:
-        return jsonify(features.audit_entries(int(request.args.get("limit","200"))))
+        accounts = _account_lookup()
+        rows = features.audit_entries(int(request.args.get("limit","200")))
+        for row in rows:
+            try:
+                det = json.loads(row.get("details") or "{}")
+            except (TypeError, ValueError):
+                det = {}
+            action = str(row.get("action") or "")
+            plain = _audit_plain(action, det, str(row.get("target_type") or ""), str(row.get("target_id") or ""), accounts)
+            row["title"] = AUDIT_TITLES.get(action, _nice(action) or "Sentinel action")
+            row["summary"] = "; ".join((f"{a}: {b}" if a else str(b)) for a, b in plain)[:400]
+        return jsonify(rows)
 
     @app.get("/api/delivery")
     def api_delivery() -> Any:
